@@ -26,7 +26,8 @@ data between tabs (M2).
 
 - System clipboard (text and HTML), printing (Sheet and Document) and slide audio, wired in `platform.rs` and `hosts.rs`. The web build keeps egui's clipboard only.
 - Auto-recovery (`recovery.rs`): while there are unsaved edits a full `.alfadoc` copy is written every 30 s to `%LOCALAPPDATA%\Alfadoc\recovery` (or the platform equivalent) with a heartbeat note. After a crash the next start offers "Recover unsaved work". A normal exit removes the copy.
-- Data tab: a virtualised grid editor (selection, fx bar, copy/paste TSV, undo/redo, sheet tabs, rename) painted from the theme colours.
+- Data tab: a virtualised grid editor (selection, fx bar, copy/paste TSV, undo/redo, sheet tabs, rename) painted from the theme colours; formulas starting with `=` and a Dimensions menu (see MAIX-1.1.md); ranges that links keep in step are tinted.
+- Links: conflicts are settled cell by cell in a Resolve dialog.
 
 ## Known risks to look at first when you run it
 

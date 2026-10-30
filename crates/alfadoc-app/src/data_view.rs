@@ -39,8 +39,25 @@ struct Change {
     sheet: u16,
     row: u32,
     col: u16,
-    old: Value,
-    new: Value,
+    /// The dimension vector the cell was written under.
+    dims: DimVector,
+    old: Content,
+    new: Content,
+}
+
+/// What a cell holds as far as editing is concerned: a typed value, or a formula (its value is
+/// worked out by the store).
+#[derive(Clone, Debug, PartialEq)]
+enum Content {
+    Value(Value),
+    Formula(String),
+}
+
+/// Where a write lands.
+struct Spot {
+    sheet: u16,
+    cell: Cell,
+    dims: DimVector,
 }
 
 struct Edit {
@@ -64,6 +81,14 @@ pub struct DataView {
     rename: Option<(u16, String)>,
     scroll_to_focus: bool,
     grab_focus: bool,
+    /// Set by undo and redo, which change formulas without touching the history.
+    needs_calc: bool,
+    /// The "new dimension" boxes of the Dimensions menu.
+    dim_key: String,
+    dim_value: String,
+    /// Ranges (sheet, top, left, bottom, right) that links keep in step; the shell sets them
+    /// before each frame and they are drawn tinted.
+    pub linked: Vec<(u16, (u32, u16, u32, u16))>,
 }
 
 impl Default for DataView {
@@ -80,6 +105,10 @@ impl Default for DataView {
             rename: None,
             scroll_to_focus: false,
             grab_focus: false,
+            needs_calc: false,
+            dim_key: String::new(),
+            dim_value: String::new(),
+            linked: vec![],
         }
     }
 }
@@ -102,14 +131,56 @@ fn address(cell: Cell) -> String {
 }
 
 fn shown(maix: &Maix, sheet: u16, row: u32, col: u16) -> String {
-    match maix.get(sheet, row, col, &DimVector::new()) {
+    match maix.get(sheet, row, col, &maix.active_dims) {
         Ok(Some(v)) if *v != Value::Null => textcell::to_text(v),
         _ => String::new(),
     }
 }
 
+/// What to put in the edit box: the formula if the cell has one, otherwise what it shows.
+fn input_text(maix: &Maix, sheet: u16, row: u32, col: u16) -> String {
+    match maix.formula(sheet, row, col, &maix.active_dims) {
+        Some(f) => f.to_string(),
+        None => shown(maix, sheet, row, col),
+    }
+}
+
 fn value_at(maix: &Maix, sheet: u16, row: u32, col: u16) -> Value {
-    maix.get(sheet, row, col, &DimVector::new()).ok().flatten().cloned().unwrap_or(Value::Null)
+    maix.get(sheet, row, col, &maix.active_dims).ok().flatten().cloned().unwrap_or(Value::Null)
+}
+
+fn content_of(maix: &Maix, spot: &Spot) -> Content {
+    match maix.formula(spot.sheet, spot.cell.0, spot.cell.1, &spot.dims) {
+        Some(f) => Content::Formula(f.to_string()),
+        None => Content::Value(maix.get(spot.sheet, spot.cell.0, spot.cell.1, &spot.dims).ok().flatten().cloned().unwrap_or(Value::Null)),
+    }
+}
+
+/// Writes `content` at `spot`; the change is added to `batch` when something actually changed.
+fn write(maix: &mut Maix, spot: &Spot, content: Content, now: u64, batch: &mut Vec<Change>) {
+    let old = content_of(maix, spot);
+    if old == content {
+        return;
+    }
+    let (sheet, row, col) = (spot.sheet, spot.cell.0, spot.cell.1);
+    let stamp = Stamp::new(AUTHOR, now);
+    let done = match &content {
+        Content::Value(v) => {
+            let cleared = maix.set_formula(sheet, row, col, &spot.dims, None).unwrap_or(false);
+            let set = maix.set(sheet, row, col, &spot.dims, v.clone(), &stamp).unwrap_or(false);
+            cleared || set
+        }
+        Content::Formula(f) => maix.set_formula(sheet, row, col, &spot.dims, Some(f)).unwrap_or(false),
+    };
+    if done {
+        batch.push(Change { sheet, row, col, dims: spot.dims.clone(), old, new: content });
+    }
+}
+
+/// Text typed by a person: `=…` is a formula, anything else a typed value.
+fn content_from(text: &str) -> Content {
+    let t = text.trim();
+    if t.len() > 1 && t.starts_with('=') { Content::Formula(t.to_string()) } else { Content::Value(parse_input(text)) }
 }
 
 /// Text typed by a person → the value stored.
@@ -119,13 +190,14 @@ fn parse_input(text: &str) -> Value {
 
 /// Writes `value`; the change is added to `batch` when something actually changed.
 fn put(maix: &mut Maix, sheet: u16, cell: Cell, value: Value, now: u64, batch: &mut Vec<Change>) {
-    let old = value_at(maix, sheet, cell.0, cell.1);
-    if old == value {
-        return;
-    }
-    if maix.set(sheet, cell.0, cell.1, &DimVector::new(), value.clone(), &Stamp::new(AUTHOR, now)).unwrap_or(false) {
-        batch.push(Change { sheet, row: cell.0, col: cell.1, old, new: value });
-    }
+    let spot = Spot { sheet, cell, dims: maix.active_dims.clone() };
+    write(maix, &spot, Content::Value(value), now, batch);
+}
+
+/// Like [`put`], for text as typed: a formula when it starts with `=`.
+fn put_input(maix: &mut Maix, sheet: u16, cell: Cell, text: &str, now: u64, batch: &mut Vec<Change>) {
+    let spot = Spot { sheet, cell, dims: maix.active_dims.clone() };
+    write(maix, &spot, content_from(text), now, batch);
 }
 
 /// The selected rectangle as (top, left, bottom, right), both ends included.
@@ -166,10 +238,9 @@ fn paste(maix: &mut Maix, sheet: u16, at: Cell, selection: (u32, u16, u32, u16),
         if cell_count(selection) > MAX_BATCH {
             return;
         }
-        let value = parse_input(rows[0][0]);
         for r in selection.0..=selection.2 {
             for c in selection.1..=selection.3 {
-                put(maix, sheet, (r, c), value.clone(), now, batch);
+                put_input(maix, sheet, (r, c), rows[0][0], now, batch);
             }
         }
         return;
@@ -182,7 +253,7 @@ fn paste(maix: &mut Maix, sheet: u16, at: Cell, selection: (u32, u16, u32, u16),
             let (Ok(dr), Ok(dc)) = (u32::try_from(dr), u16::try_from(dc)) else { continue };
             let (row, col) = (at.0.saturating_add(dr), at.1.saturating_add(dc));
             if row < MAX_ROWS && col < MAX_COLS {
-                put(maix, sheet, (row, col), parse_input(cell), now, batch);
+                put_input(maix, sheet, (row, col), cell, now, batch);
             }
         }
     }
@@ -204,8 +275,9 @@ fn replay(maix: &mut Maix, changes: &[Change], backwards: bool, now: u64) -> Vec
     let mut done = vec![];
     let order: Vec<&Change> = if backwards { changes.iter().rev().collect() } else { changes.iter().collect() };
     for c in order {
-        let value = if backwards { c.old.clone() } else { c.new.clone() };
-        put(maix, c.sheet, (c.row, c.col), value, now, &mut done);
+        let content = if backwards { c.old.clone() } else { c.new.clone() };
+        let spot = Spot { sheet: c.sheet, cell: (c.row, c.col), dims: c.dims.clone() };
+        write(maix, &spot, content, now, &mut done);
     }
     done
 }
@@ -270,6 +342,11 @@ enum Hit {
 }
 
 impl DataView {
+    /// The sheet shown and the selected rectangle (top, left, bottom, right).
+    pub fn selection(&self) -> Option<(u16, (u32, u16, u32, u16))> {
+        self.sheet.map(|s| (s, normalized(self.anchor, self.focus)))
+    }
+
     /// The used area of `sheet`, cached until the store changes.
     fn used(&mut self, maix: &Maix, sheet: u16) -> (u32, u16) {
         let stamp = maix.history.len();
@@ -306,12 +383,17 @@ impl DataView {
             return changed;
         };
         let mut batch: Vec<Change> = vec![];
+        let history_before = maix.history.len();
         self.bar_row(ui, maix, sheet, now_ms, &mut batch);
         let footer = 32.0;
         let grid_height = (ui.available_height() - footer).max(80.0);
         self.grid(ui, maix, sheet, now_ms, grid_height, &mut batch);
         self.footer(ui, maix, sheet);
         let mut changed = false;
+        if !batch.is_empty() || self.needs_calc || maix.history.len() != history_before {
+            maix.recalc(&Stamp::new(AUTHOR, now_ms));
+            self.needs_calc = false;
+        }
         if !batch.is_empty() {
             self.undo.push(batch);
             if self.undo.len() > MAX_UNDO {
@@ -336,7 +418,7 @@ impl DataView {
                 ui.add(egui::TextEdit::singleline(&mut mirror).desired_width(f32::INFINITY).interactive(false));
                 return;
             }
-            let mut text = self.bar.clone().unwrap_or_else(|| shown(maix, sheet, self.focus.0, self.focus.1));
+            let mut text = self.bar.clone().unwrap_or_else(|| input_text(maix, sheet, self.focus.0, self.focus.1));
             let response = ui.add(egui::TextEdit::singleline(&mut text).id_salt("data_value_bar").desired_width(f32::INFINITY).hint_text("Type a value, then press Enter"));
             if response.changed() || response.has_focus() {
                 self.bar = Some(text.clone());
@@ -344,7 +426,7 @@ impl DataView {
             if response.lost_focus() {
                 let escaped = ui.input(|i| i.key_pressed(Key::Escape));
                 if !escaped {
-                    put(maix, sheet, self.focus, parse_input(&text), now, batch);
+                    put_input(maix, sheet, self.focus, &text, now, batch);
                     if ui.input(|i| i.key_pressed(Key::Enter)) {
                         self.step(1, 0, false);
                     }
@@ -370,7 +452,7 @@ impl DataView {
     }
 
     fn begin_edit(&mut self, maix: &Maix, sheet: u16, replace_with: Option<String>) {
-        let text = replace_with.unwrap_or_else(|| shown(maix, sheet, self.focus.0, self.focus.1));
+        let text = replace_with.unwrap_or_else(|| input_text(maix, sheet, self.focus.0, self.focus.1));
         self.edit = Some(Edit { cell: self.focus, text, fresh: true });
     }
 
@@ -462,6 +544,14 @@ impl DataView {
 
             // ---- background and cells
             painter.rect_filled(vis, 0.0, pal.cell);
+            for (s, r) in &self.linked {
+                if *s == sheet {
+                    let area = Rect::from_min_max(cell_rect(r.0, r.1).min, cell_rect(r.2, r.3).max).intersect(vis);
+                    if area.is_positive() {
+                        painter.rect_filled(area, 0.0, pal.select_line.gamma_multiply(0.12));
+                    }
+                }
+            }
             let stroke = Stroke::new(1.0, pal.line);
             for r in first_row..last_row {
                 let y = origin.y + HEADER_H + r as f32 * ROW_H;
@@ -545,7 +635,7 @@ impl DataView {
                 if escaped {
                     ui.memory_mut(|m| m.request_focus(grid_id));
                 } else if r.lost_focus() {
-                    put(maix, sheet, edit.cell, parse_input(&edit.text), now, batch);
+                    put_input(maix, sheet, edit.cell, &edit.text, now, batch);
                     let (enter, tab, shift) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Tab), i.modifiers.shift));
                     ui.memory_mut(|m| m.request_focus(grid_id));
                     self.focus = edit.cell;
@@ -633,6 +723,7 @@ impl DataView {
     fn undo_step(&mut self, maix: &mut Maix, now: u64) {
         if let Some(changes) = self.undo.pop() {
             replay(maix, &changes, true, now);
+            self.needs_calc = true;
             if let Some(first) = changes.first() {
                 self.focus = (first.row, first.col);
                 self.anchor = self.focus;
@@ -645,8 +736,56 @@ impl DataView {
     fn redo_step(&mut self, maix: &mut Maix, now: u64) {
         if let Some(changes) = self.redo.pop() {
             replay(maix, &changes, false, now);
+            self.needs_calc = true;
             self.undo.push(changes);
         }
+    }
+
+    /// The dimension vector the grid shows and writes: pick a value per dimension or add one.
+    fn dimension_menu(&mut self, ui: &mut egui::Ui, maix: &mut Maix) {
+        let label = if maix.active_dims.is_empty() { "Dimensions".to_string() } else { format!("Dimensions: {}", alfadoc_model::dims::canonical(&maix.active_dims).replace('|', ", ")) };
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(280.0);
+            let mut known: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = std::collections::BTreeMap::new();
+            for (_, vector) in maix.vectors.iter() {
+                for (k, v) in vector {
+                    known.entry(k.clone()).or_default().insert(v.clone());
+                }
+            }
+            for (k, v) in &maix.active_dims {
+                known.entry(k.clone()).or_default().insert(v.clone());
+            }
+            if known.is_empty() {
+                ui.weak("No dimensions yet. Add one below, for example scenario = actual.");
+            }
+            for (key, values) in &known {
+                let current = maix.active_dims.get(key).cloned();
+                ui.horizontal(|ui| {
+                    ui.label(key);
+                    egui::ComboBox::from_id_salt(("dimension", key)).selected_text(current.clone().unwrap_or_else(|| "(none)".to_string())).show_ui(ui, |ui| {
+                        if ui.selectable_label(current.is_none(), "(none)").clicked() {
+                            maix.active_dims.remove(key);
+                        }
+                        for value in values {
+                            if ui.selectable_label(current.as_deref() == Some(value.as_str()), value).clicked() {
+                                maix.active_dims.insert(key.clone(), value.clone());
+                            }
+                        }
+                    });
+                });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.dim_key).hint_text("dimension").desired_width(95.0));
+                ui.add(egui::TextEdit::singleline(&mut self.dim_value).hint_text("value").desired_width(95.0));
+                if ui.button("Use").clicked() && !self.dim_key.trim().is_empty() && !self.dim_value.trim().is_empty() {
+                    maix.active_dims.insert(self.dim_key.trim().to_string(), self.dim_value.trim().to_string());
+                    self.dim_key.clear();
+                    self.dim_value.clear();
+                }
+            });
+            ui.weak("What you type is stored under the chosen values; with none chosen it is the plain value. Formulas can read another vector: =B2@{scenario=budget}, =DIMSUM(B2:B9, \"scenario=actual\").");
+        });
     }
 
     /// Sheet tabs on the left, selection summary on the right.
@@ -682,6 +821,7 @@ impl DataView {
                     }
                 });
             }
+            self.dimension_menu(ui, maix);
             if ui.button("+").on_hover_text("Add a sheet").clicked() {
                 let mut n = maix.sheets.len() + 1;
                 while maix.sheet_by_name(&format!("Sheet{n}")).is_some() {
@@ -793,5 +933,44 @@ mod tests {
         assert!((sum - 3.5).abs() < 1e-9);
         assert_eq!(number(3.0), "3");
         assert_eq!(number(3.5), "3.5");
+    }
+
+    #[test]
+    fn formulas_are_typed_calculated_and_undone() {
+        let (mut m, s) = store();
+        let mut batch = vec![];
+        put_input(&mut m, s, (0, 0), "5", 1, &mut batch);
+        put_input(&mut m, s, (0, 1), "=A1*2", 2, &mut batch);
+        m.recalc(&Stamp::new("t", 3));
+        assert_eq!(shown(&m, s, 0, 1), "10");
+        assert_eq!(input_text(&m, s, 0, 1), "=A1*2");
+        replay(&mut m, &batch, true, 4);
+        m.recalc(&Stamp::new("t", 5));
+        assert_eq!(shown(&m, s, 0, 1), "");
+        assert_eq!(input_text(&m, s, 0, 1), "");
+        replay(&mut m, &batch, false, 6);
+        m.recalc(&Stamp::new("t", 7));
+        assert_eq!(shown(&m, s, 0, 1), "10");
+        // Typing a value over a formula replaces it.
+        let mut again = vec![];
+        put_input(&mut m, s, (0, 1), "7", 8, &mut again);
+        assert_eq!(input_text(&m, s, 0, 1), "7");
+    }
+
+    #[test]
+    fn values_follow_the_active_dimensions() {
+        let (mut m, s) = store();
+        let mut batch = vec![];
+        put(&mut m, s, (0, 0), Value::Int(1), 1, &mut batch);
+        m.active_dims.insert("scenario".into(), "budget".into());
+        assert_eq!(shown(&m, s, 0, 0), "");
+        put(&mut m, s, (0, 0), Value::Int(9), 2, &mut batch);
+        assert_eq!(shown(&m, s, 0, 0), "9");
+        // Undo goes back to the cell it was written under, even though the view has moved on.
+        m.active_dims.clear();
+        replay(&mut m, &batch[1..], true, 3);
+        assert_eq!(shown(&m, s, 0, 0), "1");
+        m.active_dims.insert("scenario".into(), "budget".into());
+        assert_eq!(shown(&m, s, 0, 0), "");
     }
 }

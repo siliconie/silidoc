@@ -19,8 +19,8 @@ Ordered by dependency. Each milestone ends with something that runs and is teste
 
 ## M2 — Live links inside one file
 - Create a link from a selection (`alfadoc.link.create`): maix range ↔ Word table ↔ slide table, all directions.
-- Dispatcher-driven debounced sync; conflict toast with a resolve dialog (a/b/both).
-- Inline fields (single-cell links in a sentence).
+- ✅ Dispatcher-driven debounced sync; per-cell conflict dialog (Links ▸ Resolve…, keep A or B for each cell or for all); linked Data ranges tinted in the Data tab; Data ends can be picked from the sheet list or from the Data tab selection; one sync pass is one undo step in the document and on slides (the sheet already did this); dates written to the sheet get a date format and read back as dates.
+- Still open: inline fields (single-cell links in a sentence) need content-control support in WordCraft; choosing a Document or Slides table from a list.
 
 ## M3 — External files
 - Import `.xlsx`, `.docx`, `.pptx` as linked sources; file watcher + echo guard.
@@ -29,8 +29,9 @@ Ordered by dependency. Each milestone ends with something that runs and is teste
 
 ## M4 — Convert and extend maix
 - Export to `.docx`/`.xlsx`/`.pptx` with live content flattened to values; link tags preserved.
-- Variant blocks (dimensions on document and slide nodes); `DIMSUM`/`DIMSLICE` and the `@{…}` suffix in formulas.
-- Paged maix profile if stores outgrow memory; namespace encryption and signature.
+- ✅ In the Data tab: formulas (`=B2*2`, `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `ABS`, `ROUND`), the `@{…}` suffix, `DIMSUM`, `DIMAVG`, `DIMCOUNT`, `DIMSLICE`, and a Dimensions menu that chooses which vector the grid shows and writes (`alfadoc-model::formula`).
+- ✅ The variant-block rule (`alfadoc-model::variant`): tag format, parsing and the show/hide test. Not yet wired to the editors: hiding content in a Word control or a slide shape needs editor support, and flatten-for-audience export follows with the converters.
+- Not started: `DIMSUM` and friends inside the *sheet's* own formulas (GridCraft has no function hook, and the engines stay untouched); the paged maix profile; namespace encryption and signature.
 
 ## Not planned
 - A mobile app. Whole-body two-way sync of free text between `.docx`/`.pptx` and Alfadoc.

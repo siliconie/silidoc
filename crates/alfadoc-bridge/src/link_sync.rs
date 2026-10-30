@@ -50,6 +50,22 @@ pub fn sync_link(link: &mut Link, a: &mut dyn RegionAccess, b: &mut dyn RegionAc
     Ok(outcome)
 }
 
+/// Settles one conflicting cell by hand: the chosen side's value is written to the other side and
+/// becomes the agreed value, so the cell stops being a conflict. Nothing else is touched.
+pub fn resolve_cell(link: &mut Link, a: &mut dyn RegionAccess, b: &mut dyn RegionAccess, key: (u32, u16), keep_a: bool, now_ms: u64) -> Result<(), BridgeError> {
+    let (from, to, to_anchor) = if keep_a { (&*a, &mut *b, link.b.anchor.clone()) } else { (&*b, &mut *a, link.a.anchor.clone()) };
+    let from_anchor = if keep_a { &link.a.anchor } else { &link.b.anchor };
+    let chosen: Option<Value> = from.read_region(from_anchor)?.cells.get(&key).cloned();
+    to.write_changes(&to_anchor, &[CellChange { row: key.0, col: key.1, value: chosen.clone() }])?;
+    let mut base: Grid = link.base.as_ref().map(Snapshot::to_map).unwrap_or_default();
+    match chosen {
+        Some(v) => base.insert(key, v),
+        None => base.remove(&key),
+    };
+    link.base = Some(Snapshot::from_map(now_ms, &base));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +149,24 @@ mod tests {
         let o = sync_link(&mut l, &mut a, &mut b, Policy::PreferA, 3).unwrap();
         assert!(o.conflicts.is_empty());
         assert_eq!(b.cells[&(0, 0)], Value::Int(2));
+    }
+
+    #[test]
+    fn one_conflict_can_be_settled_by_hand() {
+        let mut l = link(SyncMode::Mirror);
+        let (mut a, mut b) = (mem(&[((0, 0), 1), ((1, 0), 1)]), mem(&[]));
+        sync_link(&mut l, &mut a, &mut b, Policy::Manual, 1).unwrap();
+        for k in [(0, 0), (1, 0)] {
+            a.cells.insert(k, Value::Int(2));
+            b.cells.insert(k, Value::Int(3));
+        }
+        assert_eq!(sync_link(&mut l, &mut a, &mut b, Policy::Manual, 2).unwrap().conflicts.len(), 2);
+        resolve_cell(&mut l, &mut a, &mut b, (0, 0), true, 3).unwrap(); // keep A
+        resolve_cell(&mut l, &mut a, &mut b, (1, 0), false, 4).unwrap(); // keep B
+        assert_eq!((b.cells[&(0, 0)].clone(), a.cells[&(1, 0)].clone()), (Value::Int(2), Value::Int(3)));
+        let o = sync_link(&mut l, &mut a, &mut b, Policy::Manual, 5).unwrap();
+        assert!(o.conflicts.is_empty());
+        assert_eq!(a.cells, b.cells);
     }
 
     #[test]

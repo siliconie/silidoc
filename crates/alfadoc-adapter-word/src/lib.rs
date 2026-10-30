@@ -10,7 +10,7 @@
 //!
 //! Writes use WordCraft's own commands (`text.insert`, `text.delete`) with the cell's text
 //! selected, so undo, track changes and document protection all apply. The user's selection is
-//! put back afterwards. Each changed cell is one undo step.
+//! put back afterwards. One sync pass is one undo step.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::borrow::BorrowMut;
@@ -300,10 +300,15 @@ impl<S: BorrowMut<Session>> RegionAccess for WordEngine<S> {
         }
         let saved: Selection = self.s().sel.clone();
         let mut result = Ok(());
+        // One sync pass is one undo step: every write after the first joins the first one's step.
+        let mut joined = false;
         for ch in changes {
-            if let Err(e) = self.write_cell(&found.path, ch) {
-                result = Err(e);
-                break;
+            match self.write_cell(&found.path, ch, joined) {
+                Ok(ran) => joined |= ran,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
             }
         }
         self.sm().sel = saved;
@@ -313,7 +318,9 @@ impl<S: BorrowMut<Session>> RegionAccess for WordEngine<S> {
 
 impl<S: BorrowMut<Session>> WordEngine<S> {
     /// Replaces one cell's text with the text of `ch.value` (or empties it).
-    fn write_cell(&mut self, table_path: &Path, ch: &CellChange) -> Result<(), BridgeError> {
+    /// Returns whether a command ran (a cell that already held the text needs none). With `join`
+    /// the command becomes part of the previous undo step.
+    fn write_cell(&mut self, table_path: &Path, ch: &CellChange, join: bool) -> Result<bool, BridgeError> {
         let (row, col) = (usize::try_from(ch.row).map_err(|_| BridgeError::BadParams("row too large".into()))?, usize::from(ch.col));
         let new_text = ch.value.as_ref().map(textcell::to_text).unwrap_or_default();
         let (first, last, old_text, end) = {
@@ -326,7 +333,7 @@ impl<S: BorrowMut<Session>> WordEngine<S> {
             (first, last, cell_text(&cell.blocks), end)
         };
         if old_text == new_text {
-            return Ok(());
+            return Ok(false);
         }
         let path_of = |block: usize| -> Result<Path, BridgeError> {
             let mut p = table_path.0.clone();
@@ -336,12 +343,15 @@ impl<S: BorrowMut<Session>> WordEngine<S> {
             Ok(Path(p))
         };
         self.sm().sel = Selection { anchor: Pos::new(StoryRef::Body, path_of(first)?, 0), focus: Pos::new(StoryRef::Body, path_of(last)?, end) };
+        if join {
+            self.sm().join_next_undo();
+        }
         if new_text.is_empty() {
             self.run("text.delete", &json!({}))?;
         } else {
             self.run("text.insert", &json!({ "text": new_text }))?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -391,6 +401,21 @@ mod tests {
         assert_eq!(r.cells.get(&(1, 1)), Some(&Value::Int(12)));
         assert_eq!(r.cells.get(&(2, 1)), Some(&Value::Float(3.5)));
         assert_eq!(r.cells.len(), 4);
+    }
+
+
+    #[test]
+    fn a_sync_pass_is_one_undo_step() {
+        let (mut w, a) = doc_with_table();
+        let changes = [
+            CellChange { row: 0, col: 0, value: Some(Value::Text("Item".into())) },
+            CellChange { row: 1, col: 0, value: Some(Value::Text("Pens".into())) },
+            CellChange { row: 1, col: 1, value: Some(Value::Int(12)) },
+        ];
+        w.write_changes(&a, &changes).unwrap();
+        assert_eq!(w.read_region(&a).unwrap().cells.len(), 3);
+        w.execute("edit.undo", &json!({})).unwrap();
+        assert!(w.read_region(&a).unwrap().cells.is_empty(), "one undo takes back the whole pass");
     }
 
     #[test]

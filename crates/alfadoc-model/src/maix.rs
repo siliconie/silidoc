@@ -127,6 +127,16 @@ impl Sheet {
         out
     }
 
+    /// The cell at `(row, col)` under every dimension vector that has one, as `(dim hash, cell)`.
+    pub fn across(&self, row: u32, col: u16) -> impl Iterator<Item = (u64, &Cell)> {
+        self.cells.range((row, col, 0)..=(row, col, u64::MAX)).map(|((_, _, d), c)| (*d, c))
+    }
+
+    /// Every cell that holds a formula: `(row, col, dim hash, formula)`.
+    pub fn formulas(&self) -> Vec<(u32, u16, u64, String)> {
+        self.cells.iter().filter_map(|((r, c, d), cell)| cell.formula.as_ref().map(|f| (*r, *c, *d, f.clone()))).collect()
+    }
+
     /// All cells at `dim`, in row-major order.
     pub fn slice(&self, dim: u64) -> impl Iterator<Item = (u32, u16, &Cell)> {
         self.cells.iter().filter(move |((_, _, d), _)| *d == dim).map(|((r, c, _), cell)| (*r, *c, cell))
@@ -178,6 +188,9 @@ pub struct Maix {
     pub sheets: Vec<Sheet>,
     #[serde(default)]
     pub history: Vec<Delta>,
+    /// The dimension vector the editors show and write (empty: the plain, undimensioned values).
+    #[serde(default, skip_serializing_if = "DimVector::is_empty")]
+    pub active_dims: DimVector,
     /// Workbook-level app registry and defaults (the manifest JSON payload of maix §8.1.2).
     #[serde(default)]
     pub app_registry: BTreeMap<String, serde_json::Value>,
@@ -187,7 +200,7 @@ pub const PROFILE: &str = "maix/1.1-json";
 
 impl Default for Maix {
     fn default() -> Self {
-        Maix { profile: PROFILE.into(), axes: vec![], vectors: DimTable::default(), sheets: vec![], history: vec![], app_registry: BTreeMap::new() }
+        Maix { profile: PROFILE.into(), axes: vec![], vectors: DimTable::default(), sheets: vec![], history: vec![], active_dims: DimVector::new(), app_registry: BTreeMap::new() }
     }
 }
 
@@ -243,6 +256,40 @@ impl Maix {
         cell.updated_at = by.at;
         self.history.push(Delta { sheet, row, col, dim, version, old, new: value, author: by.author.clone(), at: by.at });
         Ok(true)
+    }
+
+    /// The formula of a cell, if it has one.
+    pub fn formula(&self, sheet: u16, row: u32, col: u16, dims: &DimVector) -> Option<&str> {
+        let dim = self.vectors.find(dims)?;
+        self.sheet(sheet).ok()?.get(row, col, dim)?.formula.as_deref()
+    }
+
+    /// Sets (`Some`) or removes (`None`) a cell's formula text. The value is left alone: run
+    /// [`Maix::recalc`] afterwards. Returns whether the formula changed.
+    pub fn set_formula(&mut self, sheet: u16, row: u32, col: u16, dims: &DimVector, formula: Option<&str>) -> Result<bool> {
+        let dim = if formula.is_some() {
+            self.vectors.intern(dims)?
+        } else {
+            match self.vectors.find(dims) {
+                Some(d) => d,
+                None => return Ok(false), // no such vector, so no such cell
+            }
+        };
+        let sh = self.sheet_mut(sheet)?;
+        let key = (row, col, dim);
+        let new = formula.map(str::to_string);
+        match sh.cells.get_mut(&key) {
+            Some(cell) if cell.formula == new => Ok(false),
+            Some(cell) => {
+                cell.formula = new;
+                Ok(true)
+            }
+            None if new.is_none() => Ok(false),
+            None => {
+                sh.cells.insert(key, Cell { value: Value::Null, formula: new, version: 0, updated_at: 0, meta: BTreeMap::new() });
+                Ok(true)
+            }
+        }
     }
 
     pub fn get(&self, sheet: u16, row: u32, col: u16, dims: &DimVector) -> Result<Option<&Value>> {

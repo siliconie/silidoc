@@ -14,5 +14,5 @@ pub mod textcell;
 
 pub use dispatch::{Change, Dispatcher};
 pub use engine::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess};
-pub use link_sync::{Outcome, sync_link};
+pub use link_sync::{Outcome, resolve_cell, sync_link};
 pub use maix_access::MaixAccess;

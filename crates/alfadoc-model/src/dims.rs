@@ -61,6 +61,11 @@ impl DimTable {
         self.entries.is_empty()
     }
 
+    /// Every stored vector with its hash.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &DimVector)> {
+        self.entries.iter().map(|(h, e)| (*h, &e.pairs))
+    }
+
     /// Hashes of every stored vector that contains all of `filter`'s pairs (partial queries, §6.4).
     pub fn matching(&self, filter: &DimVector) -> Vec<u64> {
         self.entries

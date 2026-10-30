@@ -140,9 +140,17 @@ impl<S: BorrowMut<Session>> RegionAccess for GridEngine<S> {
         let sheet = doc.wb.sheet(index).ok_or_else(|| BridgeError::AnchorNotFound("sheet vanished".into()))?;
         let mut region = Region::default();
         for at in range.iter() {
-            let Some(value) = from_grid(&sheet.value(at)) else {
+            let Some(mut value) = from_grid(&sheet.value(at)) else {
                 continue;
             };
+            // A number in a date-formatted cell is a date, not a count of days.
+            if matches!(value, Value::Int(_) | Value::Float(_)) && is_date_format(doc.wb.styles.get(sheet.style_id(at)).num_fmt.as_str()) {
+                value = match value {
+                    Value::Int(n) => Value::Date(unix_ms_from_serial(n as f64)),
+                    Value::Float(f) => Value::Date(unix_ms_from_serial(f)),
+                    other => other,
+                };
+            }
             let row = at.row - range.start.row;
             let col = u16::try_from(at.col - range.start.col).map_err(|_| BridgeError::BadParams("region is wider than 65,535 columns".into()))?;
             region.cells.insert((row, col), value);
@@ -153,6 +161,7 @@ impl<S: BorrowMut<Session>> RegionAccess for GridEngine<S> {
     fn write_changes(&mut self, anchor: &Anchor, changes: &[CellChange]) -> Result<(), BridgeError> {
         let (index, range) = self.resolve(anchor)?;
         let mut work: Vec<(CellRef, Json, bool)> = Vec::with_capacity(changes.len());
+        let mut dates: Vec<CellRef> = vec![];
         for ch in changes {
             let at = range
                 .start
@@ -162,6 +171,9 @@ impl<S: BorrowMut<Session>> RegionAccess for GridEngine<S> {
             // Text that starts with `=` would be read as a formula; it needs `cell.set` with the
             // apostrophe that forces text. Everything else goes through `range.setValues`.
             let literal_equals = matches!(&ch.value, Some(Value::Text(t)) if t.starts_with('='));
+            if matches!(ch.value, Some(Value::Date(_))) {
+                dates.push(at);
+            }
             work.push((at, to_json(ch.value.as_ref()), literal_equals));
         }
         work.sort_by_key(|(at, _, _)| *at);
@@ -193,7 +205,18 @@ impl<S: BorrowMut<Session>> RegionAccess for GridEngine<S> {
                     run.push(value);
                     next = CellRef::new(at.row, at.col + 1);
                 }
-                flush(s, &mut run, run_start)
+                flush(s, &mut run, run_start)?;
+                // Dates are numbers to the sheet; a date format is what makes them read as dates.
+                for at in dates {
+                    let already = {
+                        let d = s.doc()?;
+                        d.wb.sheet(index).is_some_and(|sh| is_date_format(d.wb.styles.get(sh.style_id(at)).num_fmt.as_str()))
+                    };
+                    if !already {
+                        s.execute("home.numberFormat", json!({ "sheet": index, "range": at.a1(), "code": DATE_FORMAT }))?;
+                    }
+                }
+                Ok(())
             })
             .map_err(map_err)
     }
@@ -221,6 +244,19 @@ fn from_grid(v: &GridValue) -> Option<Value> {
         GridValue::Bool(b) => Some(Value::Bool(*b)),
         GridValue::Error(e) => Some(Value::Text(e.as_str().to_string())),
     }
+}
+
+/// The format given to cells that receive a date.
+const DATE_FORMAT: &str = "yyyy-mm-dd";
+
+fn is_date_format(code: &str) -> bool {
+    gridcraft_engine::display::number_format(code).is_date()
+}
+
+/// Unix milliseconds of a 1900-system date serial, to the nearest millisecond.
+#[allow(clippy::cast_possible_truncation)]
+fn unix_ms_from_serial(serial: f64) -> i64 {
+    ((serial - 25569.0) * 86_400_000.0).round() as i64
 }
 
 fn number(n: f64) -> Value {
@@ -323,7 +359,17 @@ mod tests {
         // 2026-01-01T00:00:00Z
         g.write_changes(&region_a("tbl"), &[CellChange { row: 1, col: 1, value: Some(Value::Date(1_767_225_600_000)) }]).unwrap();
         let r = g.read_region(&region_a("tbl")).unwrap();
-        assert_eq!(r.cells.get(&(1, 1)), Some(&Value::Int(46023)));
+        assert_eq!(r.cells.get(&(1, 1)), Some(&Value::Date(1_767_225_600_000)));
+        // The sheet holds the serial, shown with a date format.
+        let shown = g.session().doc().unwrap().wb.sheet(0).unwrap().value(CellRef::new(1, 1));
+        assert_eq!(shown, GridValue::Number(46023.0));
+    }
+
+    #[test]
+    fn plain_numbers_stay_numbers() {
+        let g = engine_with_table();
+        let r = g.read_region(&region_a("tbl")).unwrap();
+        assert_eq!(r.cells.get(&(1, 1)), Some(&Value::Int(12)));
     }
 
     #[test]

@@ -277,6 +277,7 @@ impl<S: BorrowMut<Session>> RegionAccess for DeckEngine<S> {
             return Ok(());
         }
         let back = self.current_slide()?;
+        let steps_before = self.s().doc().map_err(map_err)?.history.undo.len();
         self.go(found.slide_index)?;
         let mut result = Ok(());
         for ch in changes {
@@ -285,6 +286,15 @@ impl<S: BorrowMut<Session>> RegionAccess for DeckEngine<S> {
             if let Err(e) = self.run("text.set", &params) {
                 result = Err(e);
                 break;
+            }
+        }
+        // One sync pass is one undo step: keep the state before the first write and drop the
+        // steps the later writes added. (At the history limit the count cannot show how many
+        // were added, so the steps are left as they are.)
+        if let Ok(st) = self.sm().doc_mut() {
+            let keep = steps_before + 1;
+            if st.history.undo.len() > keep {
+                st.history.undo.truncate(keep);
             }
         }
         // Back to the slide the user was looking at, whether or not every write worked.
@@ -342,6 +352,21 @@ mod tests {
         assert_eq!(r.cells.get(&(1, 1)), Some(&Value::Int(12)));
         assert_eq!(r.cells.get(&(2, 1)), Some(&Value::Float(3.5)));
         assert_eq!(r.cells.len(), 4);
+    }
+
+
+    #[test]
+    fn a_sync_pass_is_one_undo_step() {
+        let (mut d, a) = deck_with_table();
+        let changes = [
+            CellChange { row: 0, col: 0, value: Some(Value::Text("Item".into())) },
+            CellChange { row: 1, col: 0, value: Some(Value::Text("Pens".into())) },
+            CellChange { row: 1, col: 1, value: Some(Value::Int(12)) },
+        ];
+        d.write_changes(&a, &changes).unwrap();
+        assert_eq!(d.read_region(&a).unwrap().cells.len(), 3);
+        d.execute("edit.undo", &json!({})).unwrap();
+        assert!(d.read_region(&a).unwrap().cells.is_empty(), "one undo takes back the whole pass");
     }
 
     #[test]

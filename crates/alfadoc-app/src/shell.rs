@@ -151,6 +151,8 @@ pub struct Shell {
     /// Copies left by a window that did not close normally, offered at start-up.
     recover_prompt: Vec<recovery::Found>,
     recover_checked: bool,
+    /// Length of the data store's history when formulas were last worked out.
+    calc_seen: usize,
     recovery_word: Option<wordcraft_engine::doc::Document>,
     recovery_word_edits: u64,
     /// Lets print jobs reach the spooler before the process ends.
@@ -162,7 +164,7 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(start: Tab, startup: Option<PathBuf>) -> Shell {
-        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), recover_prompt: vec![], recover_checked: false, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default() }
+        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), recover_prompt: vec![], recover_checked: false, calc_seen: 0, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default() }
     }
 
     fn ensure(&mut self, ctx: &egui::Context, tab: Tab) {
@@ -502,6 +504,20 @@ impl Shell {
         }
     }
 
+    /// Works out the data store's formulas again when something outside the Data tab (a link, an
+    /// opened file) changed it.
+    fn recalc_data(&mut self, ctx: &egui::Context) {
+        let seen = self.package.maix.history.len();
+        if seen == self.calc_seen {
+            return;
+        }
+        let changed = self.package.maix.recalc(&alfadoc_model::Stamp::new("alfadoc-formulas", package::now_ms()));
+        self.calc_seen = self.package.maix.history.len();
+        if changed > 0 {
+            ctx.request_repaint();
+        }
+    }
+
     /// Called every pass: offers leftover copies once, then keeps a copy of unsaved work.
     fn recovery_step(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
@@ -649,6 +665,7 @@ impl eframe::App for Shell {
         self.take_web_files(ctx);
         self.expire_toast(ctx);
         self.watch_links(ctx);
+        self.recalc_data(ctx);
         self.recovery_step(ctx);
         let active = self.active;
         self.ensure(ctx, active);
@@ -720,10 +737,12 @@ impl eframe::App for Shell {
                 }
             }
             Tab::Data => {
+                self.data.linked = self.linked_data_ranges();
                 self.data.show(ui, &mut self.package.maix, package::now_ms());
             }
         });
         self.link_window(ui.ctx());
+        self.conflict_window(ui.ctx());
         self.recovery_window(ui.ctx());
         self.frames = self.frames.saturating_add(1);
     }

@@ -18,12 +18,13 @@ use alfadoc_adapter_grid::GridEngine;
 use alfadoc_adapter_word::WordEngine;
 use alfadoc_bridge::{MaixAccess, RegionAccess, sync_link};
 use alfadoc_model::links::link_tag;
-use alfadoc_model::{Anchor, Endpoint, Link, SyncMode, Target};
+use alfadoc_model::{Anchor, Endpoint, Link, SyncMode, Target, Value};
 use alfadoc_sync::{Debouncer, Policy};
 use deckcraft_engine::model::ShapeKind;
 use wordcraft_engine::doc::Document;
 
 use crate::external::{self, ExternalFile, Kind, Lend, Spot};
+use crate::data_view::column_name;
 use crate::package;
 use crate::shell::Shell;
 
@@ -96,12 +97,35 @@ pub struct LinkDraft {
     pub b: Side,
     pub mode: SyncMode,
     pub message: String,
+    /// The link whose conflicts are being settled, by id.
+    pub resolving: Option<String>,
 }
 
 impl Default for LinkDraft {
     fn default() -> Self {
         let side = |place| Side { place, sheet: String::new(), range: String::new(), path: String::new(), table: "1".into() };
-        LinkDraft { open: false, a: side(Place::Sheet), b: side(Place::Slides), mode: SyncMode::Mirror, message: String::new() }
+        LinkDraft { open: false, a: side(Place::Sheet), b: side(Place::Slides), mode: SyncMode::Mirror, message: String::new(), resolving: None }
+    }
+}
+
+/// One cell that both ends of a link changed, kept for the conflict dialog.
+#[derive(Clone, Debug)]
+pub struct Clash {
+    pub row: u32,
+    pub col: u16,
+    pub base: String,
+    pub a: String,
+    pub b: String,
+}
+
+impl Clash {
+    fn of(key: (u32, u16), base: Option<&Value>, a: Option<&Value>, b: Option<&Value>) -> Clash {
+        let text = |v: Option<&Value>| v.map_or_else(|| "(empty)".to_string(), alfadoc_bridge::textcell::to_text);
+        Clash { row: key.0, col: key.1, base: text(base), a: text(a), b: text(b) }
+    }
+
+    fn address(&self) -> String {
+        format!("{}{}", crate::data_view::column_name(self.col), self.row + 1)
     }
 }
 
@@ -114,7 +138,7 @@ pub struct Watch {
     debounce: Debouncer,
     last_poll: f64,
     /// Unresolved conflicts per link id, from the last sync.
-    pub conflicts: HashMap<String, usize>,
+    pub conflicts: HashMap<String, Vec<Clash>>,
 }
 
 impl Watch {
@@ -135,6 +159,9 @@ enum Action {
     FillFromSelection(bool),
     SyncNow(usize, Policy),
     Delete(usize),
+    Resolve(usize, u32, u16, bool),
+    ResolveAll(usize, bool),
+    Review(Option<String>),
 }
 
 fn place_of_endpoint(e: &Endpoint) -> Option<Place> {
@@ -257,8 +284,10 @@ impl Shell {
         (wrote, conflicts, errors)
     }
 
-    /// Syncs link `index`; `Ok(None)` when one of its editors has not been opened yet.
-    fn sync_one(&mut self, index: usize, policy: Policy, now: u64) -> Result<Option<(usize, usize)>, String> {
+    /// Runs `f` on link `index` with access to both of its ends. `Ok(None)` when one of the
+    /// editors has not been opened yet. The link (with its new snapshot) is kept only when `f`
+    /// succeeds; a changed linked file is written back either way.
+    fn run_link<R>(&mut self, index: usize, now: u64, f: impl FnOnce(&mut Link, &mut dyn RegionAccess, &mut dyn RegionAccess) -> Result<R, alfadoc_bridge::BridgeError>) -> Result<Option<R>, String> {
         let Some(mut link) = self.package.links.get(index).cloned() else {
             return Ok(None);
         };
@@ -276,7 +305,7 @@ impl Shell {
             Some(path) => Some(self.external_for(path)?),
             None => None,
         };
-        let outcome: Result<Option<alfadoc_bridge::Outcome>, String> = 'sync: {
+        let outcome: Result<Option<R>, String> = 'run: {
             let Shell { grid, word, deck, package, .. } = self;
             let mut slots: [Option<Box<dyn RegionAccess + '_>>; 5] = [
                 grid.as_mut().map(|a| Box::new(GridEngine::borrowed(&mut a.session)) as Box<dyn RegionAccess + '_>),
@@ -293,9 +322,9 @@ impl Shell {
                 Place::File => 4,
             };
             let (Some(mut a), Some(mut b)) = (slots[slot(pa)].take(), slots[slot(pb)].take()) else {
-                break 'sync Ok(None);
+                break 'run Ok(None);
             };
-            sync_link(&mut link, a.as_mut(), b.as_mut(), policy, now).map(Some).map_err(|e| format!("{}: {e}", link.id))
+            f(&mut link, a.as_mut(), b.as_mut()).map(Some).map_err(|e| format!("{}: {e}", link.id))
         };
         // Write a changed file back, then keep its session for the next pass.
         if let (Some(path), Some(mut x)) = (ext_path, ext) {
@@ -303,14 +332,37 @@ impl Shell {
             self.externals.insert(path, x);
             saved?;
         }
-        let Some(outcome) = outcome? else {
+        let Some(done) = outcome? else {
             return Ok(None);
         };
-        self.watch.conflicts.insert(link.id.clone(), outcome.conflicts.len());
         if let Some(slot) = self.package.links.get_mut(index) {
             *slot = link;
         }
-        Ok(Some((outcome.wrote_a + outcome.wrote_b, outcome.conflicts.len())))
+        Ok(Some(done))
+    }
+
+    /// Syncs link `index`; `Ok(None)` when one of its editors has not been opened yet.
+    fn sync_one(&mut self, index: usize, policy: Policy, now: u64) -> Result<Option<(usize, usize)>, String> {
+        let Some(outcome) = self.run_link(index, now, |link, a, b| sync_link(link, a, b, policy, now))? else {
+            return Ok(None);
+        };
+        let id = self.package.links.get(index).map(|l| l.id.clone()).unwrap_or_default();
+        let clashes: Vec<Clash> = outcome.conflicts.iter().map(|c| Clash::of(c.key, c.base.as_ref(), c.a.as_ref(), c.b.as_ref())).collect();
+        let count = clashes.len();
+        self.watch.conflicts.insert(id, clashes);
+        Ok(Some((outcome.wrote_a + outcome.wrote_b, count)))
+    }
+
+    /// Settles one conflicting cell of link `index` with the chosen side's value.
+    fn resolve_clash(&mut self, index: usize, row: u32, col: u16, keep_a: bool) -> Result<(), String> {
+        let now = package::now_ms();
+        self.run_link(index, now, |link, a, b| alfadoc_bridge::resolve_cell(link, a, b, (row, col), keep_a, now))?;
+        if let Some(id) = self.package.links.get(index).map(|l| l.id.clone())
+            && let Some(list) = self.watch.conflicts.get_mut(&id)
+        {
+            list.retain(|c| !(c.row == row && c.col == col));
+        }
+        Ok(())
     }
 
     /// The private session for a linked file: the cached one, or a fresh read when the file was
@@ -419,6 +471,21 @@ impl Shell {
 
     fn fill_from_selection(&mut self, side_b: bool) {
         let place = if side_b { self.draft.b.place } else { self.draft.a.place };
+        if place == Place::Data {
+            let found = self.data.selection().and_then(|(id, r)| {
+                let name = self.package.maix.sheet(id).ok()?.name.clone();
+                Some((name, format!("{}{}:{}{}", column_name(r.1), r.0 + 1, column_name(r.3), r.2 + 1)))
+            });
+            let side = if side_b { &mut self.draft.b } else { &mut self.draft.a };
+            match found {
+                Some((sheet, range)) => {
+                    side.sheet = sheet;
+                    side.range = range;
+                }
+                None => self.draft.message = "Open the Data tab and select cells first.".into(),
+            }
+            return;
+        }
         if place != Place::Sheet {
             return;
         }
@@ -440,6 +507,97 @@ impl Shell {
 
     // ------------------------------------------------------------ the Links window
 
+    /// Lists the cells both ends changed, with both values, so each can be settled on its own.
+    pub(crate) fn conflict_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.draft.resolving.clone() else {
+            return;
+        };
+        let Some(index) = self.package.links.iter().position(|l| l.id == id) else {
+            self.draft.resolving = None;
+            return;
+        };
+        let clashes = self.watch.conflicts.get(&id).cloned().unwrap_or_default();
+        let (a, b) = (describe(&self.package.links[index].a, &self.package.maix), describe(&self.package.links[index].b, &self.package.maix));
+        let mut open = true;
+        let mut actions: Vec<Action> = vec![];
+        egui::Window::new("Resolve conflicts").open(&mut open).default_width(520.0).show(ctx, |ui| {
+            if clashes.is_empty() {
+                ui.label("Nothing left to settle.");
+                return;
+            }
+            ui.label(format!("{} cell(s) were changed on both sides. Choose which value each cell keeps.", clashes.len()));
+            ui.horizontal(|ui| {
+                if ui.button("Keep all from A").clicked() {
+                    actions.push(Action::ResolveAll(index, true));
+                }
+                if ui.button("Keep all from B").clicked() {
+                    actions.push(Action::ResolveAll(index, false));
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                egui::Grid::new(("clash_grid", id.as_str())).striped(true).num_columns(5).spacing([14.0, 6.0]).show(ui, |ui| {
+                    ui.strong("Cell");
+                    ui.strong(format!("A · {a}"));
+                    ui.strong(format!("B · {b}"));
+                    ui.strong("Was");
+                    ui.strong("");
+                    ui.end_row();
+                    for c in &clashes {
+                        ui.label(c.address());
+                        ui.label(&c.a);
+                        ui.label(&c.b);
+                        ui.weak(&c.base);
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Keep A").clicked() {
+                                actions.push(Action::Resolve(index, c.row, c.col, true));
+                            }
+                            if ui.small_button("Keep B").clicked() {
+                                actions.push(Action::Resolve(index, c.row, c.col, false));
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+            });
+        });
+        if !open {
+            self.draft.resolving = None;
+        }
+        for action in actions {
+            match action {
+                Action::Resolve(i, row, col, keep_a) => {
+                    if let Err(e) = self.resolve_clash(i, row, col, keep_a) {
+                        self.say(ctx, e);
+                    }
+                }
+                Action::ResolveAll(i, keep_a) => {
+                    let cells: Vec<(u32, u16)> = clashes.iter().map(|c| (c.row, c.col)).collect();
+                    for (row, col) in cells {
+                        if let Err(e) = self.resolve_clash(i, row, col, keep_a) {
+                            self.say(ctx, e);
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The ranges of the data store that links keep in step, for the Data tab to tint.
+    pub(crate) fn linked_data_ranges(&self) -> Vec<(u16, (u32, u16, u32, u16))> {
+        self.package
+            .links
+            .iter()
+            .flat_map(|l| [&l.a, &l.b])
+            .filter_map(|e| match &e.anchor {
+                Anchor::Maix { sheet, top, left, bottom, right, .. } => Some((*sheet, (*top, *left, *bottom, *right))),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn link_window(&mut self, ctx: &egui::Context) {
         if !self.draft.open {
             return;
@@ -447,13 +605,13 @@ impl Shell {
         let mut open = true;
         let mut actions: Vec<Action> = vec![];
         let mut draft = self.draft.clone();
+        let data_sheets: Vec<String> = self.package.maix.sheets.iter().map(|s| s.name.clone()).collect();
         let links: Vec<(String, String, String, SyncMode, u64, usize)> = self
             .package
             .links
             .iter()
             .map(|l| {
-                let name = |e: &Endpoint| place_of_endpoint(e).map_or("?", Place::name).to_string();
-                (l.id.clone(), name(&l.a), name(&l.b), l.mode, l.base.as_ref().map_or(0, |b| b.taken_at), self.watch.conflicts.get(&l.id).copied().unwrap_or(0))
+                (l.id.clone(), describe(&l.a, &self.package.maix), describe(&l.b, &self.package.maix), l.mode, l.base.as_ref().map_or(0, |b| b.taken_at), self.watch.conflicts.get(&l.id).map_or(0, Vec::len))
             })
             .collect();
         egui::Window::new("Links").open(&mut open).default_width(460.0).show(ctx, |ui| {
@@ -500,8 +658,20 @@ impl Shell {
                         ui.horizontal(|ui| {
                             ui.label("Data sheet");
                             ui.add(egui::TextEdit::singleline(&mut side.sheet).desired_width(110.0));
+                            if !data_sheets.is_empty() {
+                                egui::ComboBox::from_id_salt(("data_sheet_pick", label)).selected_text("pick").show_ui(ui, |ui| {
+                                    for name in &data_sheets {
+                                        if ui.selectable_label(side.sheet == *name, name).clicked() {
+                                            side.sheet = name.clone();
+                                        }
+                                    }
+                                });
+                            }
                             ui.label("Range");
                             ui.add(egui::TextEdit::singleline(&mut side.range).desired_width(90.0));
+                            if ui.button("Use selection").on_hover_text("Take the cells selected in the Data tab").clicked() {
+                                actions.push(Action::FillFromSelection(is_b));
+                            }
                         });
                     }
                     Place::Sheet => {
@@ -547,11 +717,8 @@ impl Shell {
                     ui.weak(if *taken_at == 0 { "never synced".to_string() } else { format!("synced {}", clock(*taken_at)) });
                     if *conflicts > 0 {
                         ui.colored_label(ui.visuals().warn_fg_color, format!("{conflicts} conflict(s)"));
-                        if ui.small_button("Keep A").clicked() {
-                            actions.push(Action::SyncNow(i, Policy::PreferA));
-                        }
-                        if ui.small_button("Keep B").clicked() {
-                            actions.push(Action::SyncNow(i, Policy::PreferB));
+                        if ui.small_button("Resolve…").clicked() {
+                            actions.push(Action::Review(Some(id.clone())));
                         }
                     }
                     if ui.small_button("Sync now").on_hover_text(id.as_str()).clicked() {
@@ -563,6 +730,7 @@ impl Shell {
                 });
             }
         });
+        draft.resolving = self.draft.resolving.take();
         self.draft = draft;
         self.draft.open = open;
         for action in actions {
@@ -582,6 +750,22 @@ impl Shell {
                         Err(e) => e,
                     };
                 }
+                Action::Review(id) => self.draft.resolving = id,
+                Action::Resolve(i, row, col, keep_a) => {
+                    if let Err(e) = self.resolve_clash(i, row, col, keep_a) {
+                        self.draft.message = e;
+                    }
+                }
+                Action::ResolveAll(i, keep_a) => {
+                    let id = self.package.links.get(i).map(|l| l.id.clone()).unwrap_or_default();
+                    let cells: Vec<(u32, u16)> = self.watch.conflicts.get(&id).map(|v| v.iter().map(|c| (c.row, c.col)).collect()).unwrap_or_default();
+                    for (row, col) in cells {
+                        if let Err(e) = self.resolve_clash(i, row, col, keep_a) {
+                            self.draft.message = e;
+                            break;
+                        }
+                    }
+                }
                 Action::Delete(i) => {
                     if i < self.package.links.len() {
                         let gone = self.package.links.remove(i);
@@ -591,6 +775,26 @@ impl Shell {
             }
         }
     }
+}
+
+/// What one end of a link points at, in words: `Data: Costs!A1:C10`, `Sheet range`, `report.docx`.
+fn describe(e: &Endpoint, maix: &alfadoc_model::Maix) -> String {
+    match (&e.target, &e.anchor) {
+        (Target::External { path, .. }, _) => std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned()),
+        (_, Anchor::Maix { sheet, top, left, bottom, right, .. }) => {
+            let name = maix.sheet(*sheet).map_or_else(|_| "?".to_string(), |s| s.name.clone());
+            format!("Data: {name}!{}", range_text((*top, *left, *bottom, *right)))
+        }
+        (_, Anchor::GridName { .. }) => "Sheet range".to_string(),
+        (_, Anchor::WordControl { .. }) => "Document table".to_string(),
+        (_, Anchor::DeckShape { .. }) => "Slide table".to_string(),
+    }
+}
+
+/// `(0, 0, 9, 2)` as `A1:C10`.
+fn range_text(r: (u32, u16, u32, u16)) -> String {
+    let corner = |row: u32, col: u16| format!("{}{}", column_name(col), row + 1);
+    if (r.0, r.1) == (r.2, r.3) { corner(r.0, r.1) } else { format!("{}:{}", corner(r.0, r.1), corner(r.2, r.3)) }
 }
 
 /// `HH:MM:SS` (UTC) of a millisecond timestamp.
@@ -621,6 +825,13 @@ mod tests {
     fn an_external_target_is_a_file_end() {
         let e = Endpoint { target: Target::External { path: "a.xlsx".into(), sha256: String::new() }, anchor: Anchor::GridName { name: "n".into() } };
         assert_eq!(place_of_endpoint(&e), Some(Place::File));
+    }
+
+    #[test]
+    fn ranges_print_as_cell_names() {
+        assert_eq!(range_text((0, 0, 9, 2)), "A1:C10");
+        assert_eq!(range_text((6, 1, 6, 1)), "B7");
+        assert_eq!(parse_range(&range_text((1, 26, 4, 27))), Some((1, 26, 4, 27)));
     }
 
     #[test]
