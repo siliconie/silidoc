@@ -44,6 +44,8 @@ eframe = { version = "0.37", default-features = false }
 rfd = "0.17"
 log = "0.4"
 gridcraft-engine = { path = "../gridcraft/crates/engine" }
+gridcraft-core = { path = "../gridcraft/crates/core" }
+gridcraft-numfmt = { path = "../gridcraft/crates/numfmt" }
 gridcraft-ui-egui = { path = "../gridcraft/crates/ui-egui" }
 wordcraft-engine = { path = "../wordcraft/crates/engine" }
 wordcraft-ui-egui = { path = "../wordcraft/crates/ui-egui" }

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dims::{DimTable, DimVector};
 use crate::error::{Error, Result};
+use crate::format::SheetFormat;
 
 /// A cell value. Formulas keep their text in [`Cell::formula`]; `Value` is the stored/cached result.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -58,7 +59,9 @@ pub struct Sheet {
     pub name: String,
     pub columns: BTreeMap<u16, Column>,
     pub meta: BTreeMap<String, Meta>,
-    cells: BTreeMap<Addr, Cell>,
+    /// Column widths, row heights, hidden lines, frozen panes and cell styles.
+    pub format: SheetFormat,
+    pub(crate) cells: BTreeMap<Addr, Cell>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,6 +82,8 @@ struct SheetRepr {
     columns: BTreeMap<u16, Column>,
     #[serde(default)]
     meta: BTreeMap<String, Meta>,
+    #[serde(default, skip_serializing_if = "SheetFormat::is_default")]
+    format: SheetFormat,
     cells: Vec<CellRecord>,
 }
 
@@ -89,6 +94,7 @@ impl From<SheetRepr> for Sheet {
             name: r.name,
             columns: r.columns,
             meta: r.meta,
+            format: r.format,
             cells: r.cells.into_iter().map(|c| ((c.row, c.col, c.dim), c.cell)).collect(),
         }
     }
@@ -101,6 +107,7 @@ impl From<Sheet> for SheetRepr {
             name: s.name,
             columns: s.columns,
             meta: s.meta,
+            format: s.format,
             cells: s.cells.into_iter().map(|((row, col, dim), cell)| CellRecord { row, col, dim, cell }).collect(),
         }
     }
@@ -234,7 +241,12 @@ impl Maix {
         self.sheets.iter().find(|s| s.name == name)
     }
 
-    fn sheet_mut(&mut self, id: u16) -> Result<&mut Sheet> {
+    /// The look (sizes, styles, frozen panes) of a sheet, to change it.
+    pub fn format_mut(&mut self, id: u16) -> Result<&mut SheetFormat> {
+        Ok(&mut self.sheet_mut(id)?.format)
+    }
+
+    pub(crate) fn sheet_mut(&mut self, id: u16) -> Result<&mut Sheet> {
         self.sheets.iter_mut().find(|s| s.id == id).ok_or(Error::UnknownSheet(id))
     }
 

@@ -77,3 +77,19 @@ from Excel keep working.
 
 Unchanged from the 1.0 draft §16 (`.mxm` JSON operation lists, applied atomically in version order).
 The `.alfadoc` container records its own version separately (ALFADOC-FORMAT).
+
+## Alfadoc extension: sheet `format`
+
+A sheet record may carry an optional `format` object (ignored by readers that do not know it, absent when the sheet has no custom look):
+
+```json
+"format": {
+  "layout": { "col_widths": {"2": 140.0}, "row_heights": {"0": 40.0}, "hidden_cols": [5], "hidden_rows": [], "freeze_rows": 1, "freeze_cols": 0 },
+  "styles": [ { "bold": true, "fill": 16774400, "numfmt": "#,##0.00" } ],
+  "cells": [ { "row": 0, "col": 1, "style": 1 } ],
+  "cols": { "3": 1 },
+  "rows": { "0": 1 }
+}
+```
+
+Style ids are 1-based indexes into `styles`; 0 and an unknown id mean the plain style. A cell's own style wins over its column's, which wins over its row's. Colours are `0xRRGGBB` integers; `numfmt` is an Excel number-format code. Limits: 1,048,576 rows, 16,384 columns.

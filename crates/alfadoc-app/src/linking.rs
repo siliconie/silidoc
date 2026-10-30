@@ -292,7 +292,9 @@ impl Shell {
     fn signals_changed(&mut self) -> bool {
         let grid = self.grid.as_ref().and_then(|a| a.session.active().map(|d| d.revision));
         let deck = self.deck.as_ref().and_then(|a| a.session.active().map(|d| d.revision));
-        let data = self.package.maix.history.len();
+        // Edits of the Data tab that leave no trace in the history (styles, inserted rows, sorting)
+        // count too.
+        let data = self.package.maix.history.len().wrapping_add(usize::try_from(self.data.revision()).unwrap_or(0));
         let mut changed = grid != self.watch.grid || deck != self.watch.deck || data != self.watch.data;
         self.watch.data = data;
         let outside = self.package.links.iter().flat_map(|l| [&l.a, &l.b]).any(|e| match &e.target {
@@ -681,6 +683,42 @@ impl Shell {
     }
 
     /// The ranges of the data store that links keep in step, for the Data tab to tint.
+    /// Rows or columns were inserted or deleted in a Data sheet: moves the links that point into
+    /// it so they keep covering the same cells.
+    pub(crate) fn shift_link_anchors(&mut self, sheet: u16, axis: alfadoc_model::Axis, op: alfadoc_model::Shift) {
+        let mut moved = 0;
+        for link in &mut self.package.links {
+            for end in [&mut link.a, &mut link.b] {
+                let Anchor::Maix { sheet: s, top, left, bottom, right, .. } = &mut end.anchor else { continue };
+                if *s != sheet {
+                    continue;
+                }
+                match axis {
+                    alfadoc_model::Axis::Rows => {
+                        if let Some((a, b)) = op.map_range(*top, *bottom)
+                            && (a, b) != (*top, *bottom)
+                        {
+                            (*top, *bottom) = (a, b);
+                            moved += 1;
+                        }
+                    }
+                    alfadoc_model::Axis::Cols => {
+                        if let Some((a, b)) = op.map_range(u32::from(*left), u32::from(*right))
+                            && let (Ok(a), Ok(b)) = (u16::try_from(a), u16::try_from(b))
+                            && (a, b) != (*left, *right)
+                        {
+                            (*left, *right) = (a, b);
+                            moved += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if moved > 0 {
+            self.watch.epoch += 1;
+        }
+    }
+
     pub(crate) fn linked_data_ranges(&self) -> Vec<(u16, (u32, u16, u32, u16))> {
         self.package
             .links

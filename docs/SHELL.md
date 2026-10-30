@@ -68,7 +68,15 @@ Names, the paused switch and the creation time are saved with the link (`links.j
 
 ### Data tab (Alt+4)
 
-The **Data** tab shows the shared store as a grid. Pick or add a data sheet, type into any cell, and every link attached to those cells updates its sheet, document table or slide table once typing stops. `12` is stored as a number, `007` as text. Cells cleared here are stored as empty (the store keeps its history).
+The **Data** tab shows the shared store as a grid with GridCraft's limits (1,048,576 rows by 16,384 columns). Pick or add a data sheet, type into any cell, and every link attached to those cells updates its sheet, document table or slide table once typing stops. `12` is stored as a number, `007` as text, `=` starts a formula. Cells cleared here are stored as empty (the store keeps its history).
+
+- **Sizing:** drag the edge of a row or column header to resize (all selected lines at once when whole lines are selected); double-click the edge to fit the content. Right-click ▸ Row height / Column width for exact values; Hide / Unhide on headers.
+- **Navigation:** wheel and scroll bars (they grow as you approach the end), Ctrl+wheel to zoom 40–300 %, Ctrl+arrows to jump between blocks, Ctrl+Home/End, Ctrl+Space / Shift+Space to select a column / row, and the address box (type `B7`, `A1:D20`, `C:C`, `3:5`; also Ctrl+G). View ▸ Freeze panes keeps the rows above and columns left of the active cell in place.
+- **Menus:** a menu bar (Edit, Insert, Format, Data, View), a formatting toolbar (undo/redo, number format with +/- decimals in Excel format codes, font size, bold/italic/underline/strike, text and fill colour, alignment, wrap), and right-click menus on cells, row headers, column headers, the corner and sheet tabs (rename, duplicate, move, delete).
+- **Rows and columns:** insert and delete (Ctrl++ / Ctrl+-); formulas that point at moved cells are rewritten (`=A3` becomes `=A5`, a deleted target becomes `#REF!`) and links that cover the range follow it. Sort A→Z / Z→A / range with a key column; formulas travel with their rows. Fill down / right (Ctrl+D / Ctrl+R) moves relative references.
+- **Clipboard:** inside the window copy/cut/paste keeps formulas (relative references move) and formatting; Paste special offers values, formulas or formats only. Text from other programs pastes as tab-separated values. The Paste menu entry only sees the in-window clipboard: use Ctrl+V for text from elsewhere.
+- **Undo** covers values, formats, sizes, hiding, freezing, inserts, deletes and sorts. Deleting a sheet cannot be undone and asks first. Undoing an insert or delete moves linked ranges back by the opposite shift, which is not an exact inverse when the range had shrunk.
+- Not there yet: find/replace, filters, merged cells, conditional formatting, data validation, comments, grouping, the fill-handle drag.
 
 ### File end (an Excel, Word or PowerPoint file on disk)
 

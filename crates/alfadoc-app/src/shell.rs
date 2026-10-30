@@ -514,6 +514,7 @@ impl Shell {
         }
         h = mix(h, self.recovery_word_edits);
         h = mix(h, self.package.maix.history.len() as u64);
+        h = mix(h, self.data.revision());
         mix(h, self.package.links.len() as u64)
     }
 
@@ -776,6 +777,9 @@ impl eframe::App for Shell {
             Tab::Data => {
                 self.data.linked = self.linked_data_ranges();
                 self.data.show(ui, &mut self.package.maix, package::now_ms());
+                for (sheet, axis, op) in self.data.take_shifts() {
+                    self.shift_link_anchors(sheet, axis, op);
+                }
             }
             Tab::Links => self.links_tab(ui),
         });
