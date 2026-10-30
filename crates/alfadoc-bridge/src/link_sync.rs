@@ -50,13 +50,18 @@ pub fn sync_link(link: &mut Link, a: &mut dyn RegionAccess, b: &mut dyn RegionAc
     Ok(outcome)
 }
 
+/// Writes the value of `key` in `from` to `to` (clearing it there when `from` has none) and
+/// returns that value.
+fn copy_cell(from: &dyn RegionAccess, from_anchor: &alfadoc_model::Anchor, to: &mut dyn RegionAccess, to_anchor: &alfadoc_model::Anchor, key: (u32, u16)) -> Result<Option<Value>, BridgeError> {
+    let chosen: Option<Value> = from.read_region(from_anchor)?.cells.get(&key).cloned();
+    to.write_changes(to_anchor, &[CellChange { row: key.0, col: key.1, value: chosen.clone() }])?;
+    Ok(chosen)
+}
+
 /// Settles one conflicting cell by hand: the chosen side's value is written to the other side and
 /// becomes the agreed value, so the cell stops being a conflict. Nothing else is touched.
 pub fn resolve_cell(link: &mut Link, a: &mut dyn RegionAccess, b: &mut dyn RegionAccess, key: (u32, u16), keep_a: bool, now_ms: u64) -> Result<(), BridgeError> {
-    let (from, to, to_anchor) = if keep_a { (&*a, &mut *b, link.b.anchor.clone()) } else { (&*b, &mut *a, link.a.anchor.clone()) };
-    let from_anchor = if keep_a { &link.a.anchor } else { &link.b.anchor };
-    let chosen: Option<Value> = from.read_region(from_anchor)?.cells.get(&key).cloned();
-    to.write_changes(&to_anchor, &[CellChange { row: key.0, col: key.1, value: chosen.clone() }])?;
+    let chosen = if keep_a { copy_cell(&*a, &link.a.anchor, b, &link.b.anchor, key)? } else { copy_cell(&*b, &link.b.anchor, a, &link.a.anchor, key)? };
     let mut base: Grid = link.base.as_ref().map(Snapshot::to_map).unwrap_or_default();
     match chosen {
         Some(v) => base.insert(key, v),
