@@ -29,9 +29,23 @@ with all three engines on one egui. The engine adapters and the app shell are M1
 Expected layout (see [UPSTREAM](docs/UPSTREAM.md)): `alfadoc` next to `gridcraft`, `wordcraft`, `deckcraft`.
 
 ```
-cargo test --workspace
+cargo test                      # data-layer crates only: fast, light on memory
+cargo test --workspace          # also builds the three engines and their UI stack (heavy, first run is long)
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+### Troubleshooting (Windows): "paging file is too small" / "out of memory" / `STATUS_STACK_BUFFER_OVERRUN`
+
+Building the engines compiles many large crates (`read-fonts`, `skrifa`, `vello_cpu`, `rustls`, …) at
+the same time with optimisation on, and `rustc` can exhaust virtual memory. The messages that follow
+(`only metadata stub found`, `failed to mmap rmeta`, `can't find crate`) are side effects, not real errors.
+
+1. Close memory-heavy apps and build with fewer parallel jobs: `cargo test --workspace -j 2`
+   (`.cargo/config.toml` already limits Cargo to 4 jobs; lower it if needed).
+2. Enlarge the Windows paging file: *System > Advanced system settings > Performance > Settings >
+   Advanced > Virtual memory > Change*: untick "Automatically manage", choose a drive with free space,
+   custom size 16384 MB initial / 32768 MB maximum, then restart.
+3. After a crashed build, delete half-written artifacts once: `Remove-Item -Recurse -Force target`.
 
 ## Code rules
 

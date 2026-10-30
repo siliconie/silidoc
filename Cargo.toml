@@ -6,6 +6,13 @@ members = [
     "crates/alfadoc-bridge",
     "crates/alfadoc-engines",
 ]
+# A plain `cargo test` / `cargo build` covers only the light data-layer crates. The engines (hundreds of
+# thousands of lines plus the GPU/UI stack) are built with `--workspace` or `-p alfadoc-engines`.
+default-members = [
+    "crates/alfadoc-model",
+    "crates/alfadoc-sync",
+    "crates/alfadoc-bridge",
+]
 
 [workspace.package]
 version = "0.1.0"

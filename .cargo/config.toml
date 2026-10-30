@@ -1,0 +1,3 @@
+[build]
+# Fewer parallel rustc processes: building the engines needs a lot of memory at once.
+jobs = 4
