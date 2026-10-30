@@ -115,6 +115,18 @@ impl Sheet {
         self.cells.get(&(row, col, dim))
     }
 
+    /// One past the last row and column that hold a value (so `(0, 0)` for an empty sheet).
+    pub fn extent(&self) -> (u32, u16) {
+        let mut out = (0u32, 0u16);
+        for ((row, col, _), cell) in &self.cells {
+            if cell.value != Value::Null {
+                out.0 = out.0.max(row.saturating_add(1));
+                out.1 = out.1.max(col.saturating_add(1));
+            }
+        }
+        out
+    }
+
     /// All cells at `dim`, in row-major order.
     pub fn slice(&self, dim: u64) -> impl Iterator<Item = (u32, u16, &Cell)> {
         self.cells.iter().filter(move |((_, _, d), _)| *d == dim).map(|((r, c, _), cell)| (*r, *c, cell))
@@ -188,6 +200,21 @@ impl Maix {
 
     pub fn sheet(&self, id: u16) -> Result<&Sheet> {
         self.sheets.iter().find(|s| s.id == id).ok_or(Error::UnknownSheet(id))
+    }
+
+    /// Renames a sheet. False when the name is empty or another sheet already has it.
+    pub fn rename_sheet(&mut self, id: u16, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || self.sheets.iter().any(|s| s.id != id && s.name == name) {
+            return false;
+        }
+        match self.sheet_mut(id) {
+            Ok(sheet) => {
+                sheet.name = name.to_string();
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     pub fn sheet_by_name(&self, name: &str) -> Option<&Sheet> {
@@ -277,6 +304,23 @@ mod tests {
         assert_eq!(m.history.len(), 2);
         assert_eq!(m.history[1].old, Value::Int(1));
         assert_eq!(m.sheet(s).unwrap().get(0, 0, 0).unwrap().version, 2);
+    }
+
+    #[test]
+    fn extent_ignores_cleared_cells_and_renaming_keeps_names_unique() {
+        let mut m = Maix::default();
+        let a = m.add_sheet("A");
+        let b = m.add_sheet("B");
+        assert_eq!(m.sheet(a).unwrap().extent(), (0, 0));
+        m.set(a, 4, 2, &DimVector::new(), Value::Int(1), &Stamp::new("t", 1)).unwrap();
+        m.set(a, 9, 7, &DimVector::new(), Value::Int(1), &Stamp::new("t", 2)).unwrap();
+        assert_eq!(m.sheet(a).unwrap().extent(), (10, 8));
+        m.set(a, 9, 7, &DimVector::new(), Value::Null, &Stamp::new("t", 3)).unwrap();
+        assert_eq!(m.sheet(a).unwrap().extent(), (5, 3));
+        assert!(!m.rename_sheet(b, "A"));
+        assert!(!m.rename_sheet(b, "  "));
+        assert!(m.rename_sheet(b, " Costs "));
+        assert_eq!(m.sheet(b).unwrap().name, "Costs");
     }
 
     #[test]

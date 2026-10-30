@@ -18,11 +18,15 @@ data between tabs (M2).
 
 ## Not connected yet (each engine's own app wires these; the editors work without them)
 
-- System clipboard bridges (HTML/RTF/images) and printing. Copy and paste of plain text works through egui.
-- Auto-recovery of unsaved work, saved preferences, update checks, the local control channel.
-- Audio output for slide media (DeckCraft plays silently).
+- Saved preferences, update checks, the local control channel.
 - A combined "unsaved changes" guard when the window closes: only the visible tab's guard runs.
 - Drag and drop of files, opening files from the command line.
+
+## Connected on native builds
+
+- System clipboard (text and HTML), printing (Sheet and Document) and slide audio, wired in `platform.rs` and `hosts.rs`. The web build keeps egui's clipboard only.
+- Auto-recovery (`recovery.rs`): while there are unsaved edits a full `.alfadoc` copy is written every 30 s to `%LOCALAPPDATA%\Alfadoc\recovery` (or the platform equivalent) with a heartbeat note. After a crash the next start offers "Recover unsaved work". A normal exit removes the copy.
+- Data tab: a virtualised grid editor (selection, fx bar, copy/paste TSV, undo/redo, sheet tabs, rename) painted from the theme colours.
 
 ## Known risks to look at first when you run it
 

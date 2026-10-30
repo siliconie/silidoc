@@ -49,6 +49,7 @@ wordcraft-engine = { path = "../wordcraft/crates/engine" }
 wordcraft-ui-egui = { path = "../wordcraft/crates/ui-egui" }
 deckcraft-engine = { path = "../deckcraft/crates/engine" }
 deckcraft-ui-egui = { path = "../deckcraft/crates/ui-egui" }
+deckcraft-media = { path = "../deckcraft/crates/media" }
 
 # foundation (versions match the engines')
 thiserror = "2"

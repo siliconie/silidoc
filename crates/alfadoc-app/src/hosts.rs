@@ -1,10 +1,11 @@
 //! Builds each engine's UI app for the Alfadoc window.
 //!
-//! The engines expect a host to provide platform services (file dialogs, file I/O). This is the
-//! minimum a desktop host needs: native Open and Save dialogs through `rfd`. Clipboard bridges,
-//! printing, audio and auto-recovery that the engines' own apps wire up are not connected yet;
-//! the editors work without them (see docs/SHELL.md for the list).
+//! The engines expect a host to provide platform services. On the desktop that is native Open and
+//! Save dialogs through `rfd`, plus the system clipboard (HTML too), printing and audio from
+//! `platform.rs`. Auto-recovery is done by the shell for the whole package (`recovery.rs`).
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::platform;
 use deckcraft_ui_egui::SlideApp;
 use gridcraft_ui_egui::SheetApp;
 use wordcraft_ui_egui::WordApp;
@@ -40,10 +41,18 @@ fn grid_services() -> gridcraft_ui_egui::Services {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn grid_services() -> gridcraft_ui_egui::Services {
+    // Keep the owner alive: X11 and Wayland serve clipboard data from this handle.
+    let clipboard = platform::clipboard::handle();
+    let (html_clipboard, text_clipboard) = (clipboard.clone(), clipboard.clone());
     gridcraft_ui_egui::Services {
         pick_open: Some(Box::new(|| rfd::FileDialog::new().add_filter("Spreadsheets", SHEET_EXTS).pick_file().map(path_string))),
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(path_string))),
         pick_picture: Some(Box::new(|| rfd::FileDialog::new().add_filter("Pictures", PICTURE_EXTS).pick_file().map(path_string))),
+        copy_html: Some(Box::new(move |html, text| platform::clipboard::set_html(&clipboard, html, text))),
+        paste_html: Some(Box::new(move || platform::clipboard::html(&html_clipboard))),
+        paste_text: Some(Box::new(move || platform::clipboard::text(&text_clipboard))),
+        printers: Some(platform::print::grid::discover()),
+        print_native: Some(platform::print::grid::submit()),
         ..Default::default()
     }
 }
@@ -68,6 +77,8 @@ fn word_services() -> wordcraft_ui_egui::Services {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn word_services() -> wordcraft_ui_egui::Services {
+    let clipboard = platform::clipboard::handle();
+    let (text_clipboard, html_clipboard, set_clipboard) = (clipboard.clone(), clipboard.clone(), clipboard);
     wordcraft_ui_egui::Services {
         pick_open: Some(Box::new(|purpose: &str| {
             let mut dialog = rfd::FileDialog::new();
@@ -80,6 +91,12 @@ fn word_services() -> wordcraft_ui_egui::Services {
             dialog.pick_file().map(path_string)
         })),
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(path_string))),
+        printers: Some(platform::print::word::discover()),
+        print_native: Some(platform::print::word::submit()),
+        clipboard_text: Some(Box::new(move || platform::clipboard::text(&text_clipboard))),
+        clipboard_html: Some(Box::new(move || platform::clipboard::html(&html_clipboard))),
+        // The third argument is MathML for a copied equation; the plain HTML flavour is enough here.
+        set_clipboard_html: Some(Box::new(move |html, text, _mathml| platform::clipboard::set_html(&set_clipboard, html, text).is_ok())),
         ..Default::default()
     }
 }
@@ -104,6 +121,8 @@ fn deck_services() -> deckcraft_ui_egui::Services {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn deck_services() -> deckcraft_ui_egui::Services {
+    let clipboard = platform::clipboard::handle();
+    let (html_clipboard, set_clipboard) = (clipboard.clone(), clipboard);
     deckcraft_ui_egui::Services {
         pick_open: Some(Box::new(|purpose: &str| {
             let dialog = rfd::FileDialog::new();
@@ -119,6 +138,9 @@ fn deck_services() -> deckcraft_ui_egui::Services {
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(path_string))),
         read: Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string()))),
         write: Some(Box::new(|p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| e.to_string()))),
+        clipboard_html: Some(Box::new(move || platform::clipboard::html(&html_clipboard))),
+        clipboard_set_html: Some(Box::new(move |html, text| platform::clipboard::set_html(&set_clipboard, html, text).is_ok())),
+        audio_out: Some(Box::new(platform::audio::CpalOut::default())),
         ..Default::default()
     }
 }

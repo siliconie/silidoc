@@ -11,6 +11,7 @@ use crate::hosts;
 use crate::data_view::DataView;
 use crate::linking::{LinkDraft, Watch};
 use crate::package;
+use crate::recovery::{self, Recovery};
 use alfadoc_model::Alfadoc;
 use std::path::PathBuf;
 
@@ -145,13 +146,23 @@ pub struct Shell {
     /// Linked `.xlsx` files on disk, opened in private sessions, by path.
     pub(crate) externals: std::collections::HashMap<String, crate::external::ExternalFile>,
     pub(crate) data: DataView,
+    /// Keeps a copy of unsaved work so a crash loses nothing (`recovery.rs`).
+    recovery: Recovery,
+    /// Copies left by a window that did not close normally, offered at start-up.
+    recover_prompt: Vec<recovery::Found>,
+    recover_checked: bool,
+    recovery_word: Option<wordcraft_engine::doc::Document>,
+    recovery_word_edits: u64,
+    /// Lets print jobs reach the spooler before the process ends.
+    #[cfg(not(target_arch = "wasm32"))]
+    _print_guard: crate::platform::print::ExitGuard,
     pub(crate) draft: LinkDraft,
     pub(crate) watch: Watch,
 }
 
 impl Shell {
     pub fn new(start: Tab, startup: Option<PathBuf>) -> Shell {
-        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), draft: LinkDraft::default(), watch: Watch::default() }
+        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), recover_prompt: vec![], recover_checked: false, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default() }
     }
 
     fn ensure(&mut self, ctx: &egui::Context, tab: Tab) {
@@ -304,6 +315,7 @@ impl Shell {
         std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         self.file = Some(path);
+        self.recovery.saved();
         Ok(Some(format!("Saved {name}")))
     }
 
@@ -449,7 +461,125 @@ impl Shell {
         self.package = package;
         self.externals.clear();
         self.watch.request_sync(package::now_ms());
+        self.recovery.saved();
         Ok(Some(format!("Opened {name}")))
+    }
+
+    /// A number that changes with every edit in any editor, link or the data store.
+    fn edit_signature(&mut self) -> u64 {
+        fn mix(h: u64, x: u64) -> u64 {
+            (h ^ x).wrapping_mul(0x0000_0100_0000_01b3)
+        }
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        if let Some(rev) = self.grid.as_ref().and_then(|a| a.session.active().map(|d| d.revision)) {
+            h = mix(h, rev as u64);
+        }
+        if let Some(rev) = self.deck.as_ref().and_then(|a| a.session.active().map(|d| d.revision)) {
+            h = mix(h, rev as u64);
+        }
+        if let Some(app) = self.word.as_ref() {
+            let same = self.recovery_word.as_ref().is_some_and(|old| old.same_content(&app.session.doc));
+            if !same {
+                self.recovery_word = Some(app.session.doc.clone());
+                self.recovery_word_edits += 1;
+            }
+        }
+        h = mix(h, self.recovery_word_edits);
+        h = mix(h, self.package.maix.history.len() as u64);
+        mix(h, self.package.links.len() as u64)
+    }
+
+    /// Writes the recovery copy now.
+    fn recovery_write(&mut self, now: f64) {
+        let title = self.file.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.alfadoc".to_string(), |n| n.to_string_lossy().into_owned());
+        match self.package_bytes(&title) {
+            Ok(bytes) => {
+                if let Err(e) = self.recovery.write(now, package::now_ms(), &bytes, self.file.as_deref(), &title) {
+                    log::warn!("could not write a recovery copy: {e}");
+                }
+            }
+            Err(e) => log::warn!("could not prepare a recovery copy: {e}"),
+        }
+    }
+
+    /// Called every pass: offers leftover copies once, then keeps a copy of unsaved work.
+    fn recovery_step(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if !self.recover_checked && self.frames > 2 {
+            self.recover_checked = true;
+            self.recover_prompt = recovery::found(package::now_ms());
+            if !self.recover_prompt.is_empty() {
+                ctx.request_repaint();
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(recovery::CHECK_SECS as u64));
+        if !self.recovery.due(now) {
+            return;
+        }
+        self.recovery.beat(now, package::now_ms());
+        let signature = self.edit_signature();
+        if self.recovery.wants_copy(now, signature) {
+            self.recovery_write(now);
+        }
+    }
+
+    /// The "Recover unsaved work" window shown at start-up.
+    fn recovery_window(&mut self, ctx: &egui::Context) {
+        if self.recover_prompt.is_empty() {
+            return;
+        }
+        let now_ms = package::now_ms();
+        let (mut recover, mut discard, mut discard_all, mut later) = (None, None, false, false);
+        egui::Window::new("Recover unsaved work").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.label("Alfadoc did not close normally last time. These copies of unsaved work were kept:");
+            ui.add_space(6.0);
+            for (i, found) in self.recover_prompt.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.strong(&found.title);
+                    ui.weak(format!("kept {}", recovery::ago(now_ms, found.saved_at)));
+                    if ui.button("Recover").clicked() {
+                        recover = Some(i);
+                    }
+                    if ui.button("Discard").clicked() {
+                        discard = Some(i);
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            ui.weak("Recover replaces what is open now.");
+            ui.horizontal(|ui| {
+                if ui.button("Discard all").clicked() {
+                    discard_all = true;
+                }
+                if ui.button("Decide later").clicked() {
+                    later = true;
+                }
+            });
+        });
+        if discard_all {
+            for found in self.recover_prompt.drain(..) {
+                found.discard();
+            }
+        } else if later {
+            self.recover_prompt.clear();
+        } else if let Some(i) = discard {
+            self.recover_prompt.remove(i).discard();
+        } else if let Some(i) = recover {
+            let found = self.recover_prompt.remove(i);
+            let result = found.read().map_err(|e| e.to_string()).and_then(|bytes| self.load_package(ctx, &found.title, &bytes));
+            match result {
+                Ok(_) => {
+                    self.file = found.original.as_ref().map(PathBuf::from);
+                    // The recovered work is still unsaved: keep a fresh copy before dropping the old one.
+                    self.recovery.mark_unsaved();
+                    self.recovery_write(ctx.input(|i| i.time));
+                    found.discard();
+                    self.say(ctx, "Recovered. Save to keep it.");
+                    self.set_title(ctx);
+                }
+                Err(e) => self.say(ctx, format!("Could not recover: {e}")),
+            }
+        }
     }
 
     /// Draws the tab bar; returns the tab the user asked for, by click or Alt+1..3.
@@ -519,6 +649,7 @@ impl eframe::App for Shell {
         self.take_web_files(ctx);
         self.expire_toast(ctx);
         self.watch_links(ctx);
+        self.recovery_step(ctx);
         let active = self.active;
         self.ensure(ctx, active);
         match active {
@@ -569,7 +700,10 @@ impl eframe::App for Shell {
             self.pending = Some(tab);
             ui.ctx().request_repaint();
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match self.active {
+        // The Data tab has no engine behind it to paint its background, so it fills its own with the
+        // current theme's colour (a frameless panel would show the window's black clear colour).
+        let frame = if self.active == Tab::Data { egui::Frame::new().fill(ui.visuals().panel_fill) } else { egui::Frame::NONE };
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| match self.active {
             Tab::Sheet => {
                 if let Some(app) = self.grid.as_mut() {
                     app.ui(ui);
@@ -590,6 +724,7 @@ impl eframe::App for Shell {
             }
         });
         self.link_window(ui.ctx());
+        self.recovery_window(ui.ctx());
         self.frames = self.frames.saturating_add(1);
     }
 }

@@ -12,7 +12,10 @@ mod external;
 mod graphics;
 mod hosts;
 mod linking;
+#[cfg(not(target_arch = "wasm32"))]
+mod platform;
 mod package;
+mod recovery;
 mod shell;
 #[cfg(target_arch = "wasm32")]
 mod web;

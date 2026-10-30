@@ -30,11 +30,17 @@ deckcraft-engine = { workspace = true }
 deckcraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 rfd = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard", "wayland", "x11"] }
+# System clipboard (HTML too), printing and audio, as in the engines' own desktop apps.
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+craft-print = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
+cpal = "0.16"
+deckcraft-media = { workspace = true }
 
 # The browser build (experimental): see docs/WEB.md.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
