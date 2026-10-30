@@ -23,6 +23,7 @@ use alfadoc_sync::{Debouncer, Policy};
 use deckcraft_engine::model::ShapeKind;
 use wordcraft_engine::doc::Document;
 
+use crate::external::{self, ExternalFile, Kind, Lend, Spot};
 use crate::package;
 use crate::shell::Shell;
 
@@ -42,10 +43,12 @@ pub enum Place {
     Document,
     Slides,
     Data,
+    /// An `.xlsx`, `.docx` or `.pptx` file on disk.
+    File,
 }
 
 impl Place {
-    const ALL: [Place; 4] = [Place::Sheet, Place::Document, Place::Slides, Place::Data];
+    const ALL: [Place; 5] = [Place::Sheet, Place::Document, Place::Slides, Place::Data, Place::File];
 
     fn part(self) -> &'static str {
         match self {
@@ -53,6 +56,7 @@ impl Place {
             Place::Document => package::DOC_PART,
             Place::Slides => package::DECK_PART,
             Place::Data => DATA_PART,
+            Place::File => "",
         }
     }
 
@@ -62,6 +66,7 @@ impl Place {
             Place::Document => "Document",
             Place::Slides => "Slides",
             Place::Data => "Data",
+            Place::File => "File",
         }
     }
 }
@@ -78,6 +83,10 @@ pub struct Side {
     /// Sheet name and range, used for the sheet and the data store.
     pub sheet: String,
     pub range: String,
+    /// The file path, used when `place` is a file.
+    pub path: String,
+    /// Which table (1, 2, …) of a `.docx` or `.pptx` file, used when `place` is a file.
+    pub table: String,
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +100,7 @@ pub struct LinkDraft {
 
 impl Default for LinkDraft {
     fn default() -> Self {
-        let side = |place| Side { place, sheet: String::new(), range: String::new() };
+        let side = |place| Side { place, sheet: String::new(), range: String::new(), path: String::new(), table: "1".into() };
         LinkDraft { open: false, a: side(Place::Sheet), b: side(Place::Slides), mode: SyncMode::Mirror, message: String::new() }
     }
 }
@@ -106,6 +115,13 @@ pub struct Watch {
     last_poll: f64,
     /// Unresolved conflicts per link id, from the last sync.
     pub conflicts: HashMap<String, usize>,
+}
+
+impl Watch {
+    /// Asks for a sync pass soon (after a package was opened, say).
+    pub fn request_sync(&mut self, now: u64) {
+        self.debounce.event(now);
+    }
 }
 
 impl Default for Watch {
@@ -123,8 +139,8 @@ enum Action {
 
 fn place_of_endpoint(e: &Endpoint) -> Option<Place> {
     match &e.target {
-        Target::Internal { part } => Place::ALL.into_iter().find(|p| p.part() == part),
-        Target::External { .. } => None,
+        Target::Internal { part } => Place::ALL.into_iter().find(|p| p.part() == part && *p != Place::File),
+        Target::External { .. } => Some(Place::File),
     }
 }
 
@@ -195,6 +211,11 @@ impl Shell {
         let data = self.package.maix.history.len();
         let mut changed = grid != self.watch.grid || deck != self.watch.deck || data != self.watch.data;
         self.watch.data = data;
+        let outside = self.package.links.iter().flat_map(|l| [&l.a, &l.b]).any(|e| match &e.target {
+            Target::External { path, .. } => self.externals.get(path).is_some_and(|x| x.changed_on_disk(std::path::Path::new(path))),
+            Target::Internal { .. } => false,
+        });
+        changed |= outside;
         self.watch.grid = grid;
         self.watch.deck = deck;
         if let Some(app) = self.word.as_ref() {
@@ -247,30 +268,60 @@ impl Shell {
         if pa == pb {
             return Err("both ends of a link must be in different places".into());
         }
-        let outcome = {
+        let ext_path = [&link.a, &link.b].into_iter().find_map(|e| match &e.target {
+            Target::External { path, .. } => Some(path.clone()),
+            Target::Internal { .. } => None,
+        });
+        let mut ext = match &ext_path {
+            Some(path) => Some(self.external_for(path)?),
+            None => None,
+        };
+        let outcome: Result<Option<alfadoc_bridge::Outcome>, String> = 'sync: {
             let Shell { grid, word, deck, package, .. } = self;
-            let mut slots: [Option<Box<dyn RegionAccess + '_>>; 4] = [
+            let mut slots: [Option<Box<dyn RegionAccess + '_>>; 5] = [
                 grid.as_mut().map(|a| Box::new(GridEngine::borrowed(&mut a.session)) as Box<dyn RegionAccess + '_>),
                 word.as_mut().map(|a| Box::new(WordEngine::borrowed(&mut a.session)) as Box<dyn RegionAccess + '_>),
                 deck.as_mut().map(|a| Box::new(DeckEngine::borrowed(&mut a.session)) as Box<dyn RegionAccess + '_>),
                 Some(Box::new(MaixAccess::new(&mut package.maix, DATA_AUTHOR, now)) as Box<dyn RegionAccess + '_>),
+                ext.as_mut().map(|x| Box::new(Lend(x)) as Box<dyn RegionAccess + '_>),
             ];
             let slot = |p: Place| match p {
                 Place::Sheet => 0,
                 Place::Document => 1,
                 Place::Slides => 2,
                 Place::Data => 3,
+                Place::File => 4,
             };
             let (Some(mut a), Some(mut b)) = (slots[slot(pa)].take(), slots[slot(pb)].take()) else {
-                return Ok(None);
+                break 'sync Ok(None);
             };
-            sync_link(&mut link, a.as_mut(), b.as_mut(), policy, now).map_err(|e| format!("{}: {e}", link.id))?
+            sync_link(&mut link, a.as_mut(), b.as_mut(), policy, now).map(Some).map_err(|e| format!("{}: {e}", link.id))
+        };
+        // Write a changed file back, then keep its session for the next pass.
+        if let (Some(path), Some(mut x)) = (ext_path, ext) {
+            let saved = if x.is_dirty() { x.save(std::path::Path::new(&path)) } else { Ok(()) };
+            self.externals.insert(path, x);
+            saved?;
+        }
+        let Some(outcome) = outcome? else {
+            return Ok(None);
         };
         self.watch.conflicts.insert(link.id.clone(), outcome.conflicts.len());
         if let Some(slot) = self.package.links.get_mut(index) {
             *slot = link;
         }
         Ok(Some((outcome.wrote_a + outcome.wrote_b, outcome.conflicts.len())))
+    }
+
+    /// The private session for a linked file: the cached one, or a fresh read when the file was
+    /// changed outside Alfadoc (or has not been read yet).
+    fn external_for(&mut self, path: &str) -> Result<ExternalFile, String> {
+        if let Some(x) = self.externals.remove(path)
+            && !x.changed_on_disk(std::path::Path::new(path))
+        {
+            return Ok(x);
+        }
+        ExternalFile::open(std::path::Path::new(path))
     }
 
     // ------------------------------------------------------------ creating
@@ -291,6 +342,27 @@ impl Shell {
                     None => maix.add_sheet(side.sheet.trim()),
                 };
                 Anchor::Maix { sheet, top, left, bottom, right, dims: alfadoc_model::DimVector::new() }
+            }
+            Place::File => {
+                let path = side.path.trim().to_string();
+                let kind = external::kind_of(&path).ok_or("Choose an .xlsx, .docx or .pptx file.")?;
+                let spot = if kind == Kind::Xlsx {
+                    if side.sheet.trim().is_empty() || side.range.trim().is_empty() {
+                        return Err("Enter the sheet name and the cell range in the file, for example Sheet1 and A1:C10.".into());
+                    }
+                    Spot::Cells { sheet: side.sheet.clone(), range: side.range.clone() }
+                } else {
+                    let n = side.table.trim().parse::<usize>().ok().filter(|n| *n >= 1).ok_or("Enter the table number in the file: 1 for the first table, 2 for the second…")?;
+                    Spot::Table(n)
+                };
+                let mut x = self.external_for(&path)?;
+                let anchor = x.anchor_for(id, &spot)?;
+                x.mark_dirty();
+                let saved = x.save(std::path::Path::new(&path));
+                self.externals.insert(path.clone(), x);
+                saved?;
+                let sha256 = std::fs::read(&path).map(|b| alfadoc_model::container::sha256_hex(&b)).map_err(|e| e.to_string())?;
+                return Ok(Endpoint { target: Target::External { path, sha256 }, anchor });
             }
             Place::Sheet => {
                 let app = self.grid.as_mut().ok_or_else(|| missing(Place::Sheet))?;
@@ -398,6 +470,32 @@ impl Shell {
                     });
                 });
                 match side.place {
+                    Place::File => {
+                        ui.horizontal(|ui| {
+                            ui.label("File");
+                            ui.add(egui::TextEdit::singleline(&mut side.path).desired_width(220.0));
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if ui.button("Browse").clicked()
+                                && let Some(p) = rfd::FileDialog::new().add_filter("Excel, Word or PowerPoint", &["xlsx", "docx", "pptx"]).pick_file()
+                            {
+                                side.path = p.to_string_lossy().into_owned();
+                            }
+                        });
+                        if matches!(external::kind_of(&side.path), Some(Kind::Docx | Kind::Pptx)) {
+                            ui.horizontal(|ui| {
+                                ui.label("Table number");
+                                ui.add(egui::TextEdit::singleline(&mut side.table).desired_width(50.0));
+                                ui.weak("1 = the first table in the file");
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label("Sheet");
+                                ui.add(egui::TextEdit::singleline(&mut side.sheet).desired_width(110.0));
+                                ui.label("Range");
+                                ui.add(egui::TextEdit::singleline(&mut side.range).desired_width(90.0));
+                            });
+                        }
+                    }
                     Place::Data => {
                         ui.horizontal(|ui| {
                             ui.label("Data sheet");
@@ -513,10 +611,16 @@ mod tests {
 
     #[test]
     fn parts_map_to_places_and_back() {
-        for place in Place::ALL {
+        for place in Place::ALL.into_iter().filter(|p| *p != Place::File) {
             let e = Endpoint { target: Target::Internal { part: place.part().into() }, anchor: Anchor::GridName { name: "n".into() } };
             assert_eq!(place_of_endpoint(&e), Some(place));
         }
+    }
+
+    #[test]
+    fn an_external_target_is_a_file_end() {
+        let e = Endpoint { target: Target::External { path: "a.xlsx".into(), sha256: String::new() }, anchor: Anchor::GridName { name: "n".into() } };
+        assert_eq!(place_of_endpoint(&e), Some(Place::File));
     }
 
     #[test]

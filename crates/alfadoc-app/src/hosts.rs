@@ -9,12 +9,16 @@ use deckcraft_ui_egui::SlideApp;
 use gridcraft_ui_egui::SheetApp;
 use wordcraft_ui_egui::WordApp;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn path_string(p: std::path::PathBuf) -> String {
     p.to_string_lossy().into_owned()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const SHEET_EXTS: &[&str] = &["gridcraft", "xlsx", "xlsm", "xltx", "xls", "xlsb", "ods", "csv", "tsv", "txt", "json"];
+#[cfg(not(target_arch = "wasm32"))]
 const SLIDE_EXTS: &[&str] = &["deckcraft", "pptx", "potx", "ppsx"];
+#[cfg(not(target_arch = "wasm32"))]
 const PICTURE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"];
 
 // ---------------------------------------------------------------- GridCraft
@@ -27,6 +31,14 @@ pub fn grid_app(ctx: &egui::Context) -> SheetApp {
     app
 }
 
+/// In the browser the editors' own Open/Save menus have no file system to talk to; Alfadoc's
+/// Open, Save, Import and Export buttons take their place.
+#[cfg(target_arch = "wasm32")]
+fn grid_services() -> gridcraft_ui_egui::Services {
+    gridcraft_ui_egui::Services::default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn grid_services() -> gridcraft_ui_egui::Services {
     gridcraft_ui_egui::Services {
         pick_open: Some(Box::new(|| rfd::FileDialog::new().add_filter("Spreadsheets", SHEET_EXTS).pick_file().map(path_string))),
@@ -47,6 +59,14 @@ pub fn word_app() -> WordApp {
     WordApp::new(session, word_services())
 }
 
+/// In the browser the editors' own Open/Save menus have no file system to talk to; Alfadoc's
+/// Open, Save, Import and Export buttons take their place.
+#[cfg(target_arch = "wasm32")]
+fn word_services() -> wordcraft_ui_egui::Services {
+    wordcraft_ui_egui::Services::default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn word_services() -> wordcraft_ui_egui::Services {
     wordcraft_ui_egui::Services {
         pick_open: Some(Box::new(|purpose: &str| {
@@ -75,6 +95,14 @@ pub fn deck_app(ctx: &egui::Context) -> SlideApp {
     app
 }
 
+/// In the browser the editors' own Open/Save menus have no file system to talk to; Alfadoc's
+/// Open, Save, Import and Export buttons take their place.
+#[cfg(target_arch = "wasm32")]
+fn deck_services() -> deckcraft_ui_egui::Services {
+    deckcraft_ui_egui::Services::default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn deck_services() -> deckcraft_ui_egui::Services {
     deckcraft_ui_egui::Services {
         pick_open: Some(Box::new(|purpose: &str| {

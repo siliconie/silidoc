@@ -50,3 +50,18 @@ Either end of a link can also be **Data**: a named sheet and range of the shared
 ### Data tab (Alt+4)
 
 The **Data** tab shows the shared store as a grid. Pick or add a data sheet, type into any cell, and every link attached to those cells updates its sheet, document table or slide table once typing stops. `12` is stored as a number, `007` as text. Cells cleared here are stored as empty (the store keeps its history).
+
+### File end (an Excel, Word or PowerPoint file on disk)
+
+An end can also be **File**: an `.xlsx`, `.docx` or `.pptx` file anywhere on disk.
+
+* **Workbook:** give a sheet and a range. Alfadoc stores a name for the range inside the file.
+* **Word or PowerPoint file:** give a **table number** (1 = the first table in reading order). Alfadoc tags that table (Word: the table's Alt Text; PowerPoint: the shape name) so the link finds it again even if tables are added before it.
+
+Alfadoc opens the file in a private session, keeps the table or range equal to the other end, and writes the file back when a sync changed it. When Excel, Word or PowerPoint (or anything else) saves the file, Alfadoc reloads it and syncs. The path is saved in the `.alfadoc` file; the file is read again when the package is opened.
+
+Alfadoc writes the file with the engine's own writer (GridCraft, WordCraft or DeckCraft), so features the engine does not model can be lost the first time. A copy of the original is kept beside it as `<name>.alfadoc-backup.<ext>` before that first write. Close the file in its Office program while Alfadoc links to it, or the program may hold it locked. (`.xlsm` is not linkable: the writer would drop the macros.)
+
+### Several documents per editor
+
+Each editor can have several documents open. **Save** stores all of them in the package (the active one as `main.<ext>`, the others as `doc2.<ext>`, …) and **Open** brings them all back. **Open** and **Import** replace a blank, untouched workbook or presentation instead of adding a second one. Links act on the *active* document of each editor.

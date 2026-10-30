@@ -90,6 +90,41 @@ impl<S: BorrowMut<Session>> WordEngine<S> {
         self.run("table.altText", &json!({ "text": tag })).map(|_| ())
     }
 
+    /// How many tables the document body holds, tagged or not (nested ones included).
+    pub fn table_count(&self) -> usize {
+        self.all_table_paths().len()
+    }
+
+    /// Tags the `nth` table (1-based, in document order) with `tag`, wherever the caret is. The
+    /// user's selection is put back.
+    pub fn tag_table(&mut self, nth: usize, tag: &str) -> Result<(), BridgeError> {
+        let paths = self.all_table_paths();
+        let path = nth.checked_sub(1).and_then(|i| paths.get(i)).ok_or_else(|| BridgeError::AnchorNotFound(format!("the document has {} table(s); there is no table {nth}", paths.len())))?;
+        let at = {
+            let table = self.table(path)?;
+            let cell = table.rows.first().and_then(|r| r.cells.first()).ok_or_else(|| BridgeError::AnchorNotFound("the table has no cells".into()))?;
+            let block = cell.blocks.iter().position(|b| b.as_para().is_some()).ok_or_else(|| BridgeError::AnchorNotFound("the table's first cell has no paragraph".into()))?;
+            let mut p = path.0.clone();
+            for part in [0usize, 0, block] {
+                p.push(u32::try_from(part).map_err(|_| BridgeError::BadParams("cell too large".into()))?);
+            }
+            Pos::new(StoryRef::Body, Path(p), 0)
+        };
+        let saved = self.s().sel.clone();
+        self.sm().sel = Selection { anchor: at.clone(), focus: at };
+        let result = self.run("table.altText", &json!({ "text": tag })).map(|_| ());
+        self.sm().sel = saved;
+        result
+    }
+
+    fn all_table_paths(&self) -> Vec<Path> {
+        let mut out = vec![];
+        if let Some(body) = self.s().doc.story(StoryRef::Body) {
+            collect_paths(body, &[], 0, &mut out);
+        }
+        out
+    }
+
     fn run(&mut self, id: &str, params: &Json) -> Result<Json, BridgeError> {
         self.sm().run(id, params).map_err(map_err)
     }
@@ -165,6 +200,26 @@ fn find_in(blocks: &Blocks, prefix: &[u32], tag: &str, depth: usize) -> Option<F
         }
     }
     None
+}
+
+fn collect_paths(blocks: &Blocks, prefix: &[u32], depth: usize, out: &mut Vec<Path>) {
+    if depth > MAX_TABLE_DEPTH {
+        return;
+    }
+    for (i, block) in blocks.iter().enumerate() {
+        let Block::Table(t) = &**block else { continue };
+        let Ok(at) = u32::try_from(i) else { continue };
+        let mut path = prefix.to_vec();
+        path.push(at);
+        out.push(Path(path));
+        for (r, row) in t.rows.iter().enumerate() {
+            for (c, cell) in row.cells.iter().enumerate() {
+                if let Some(inner) = child_prefix(prefix, i, r, c) {
+                    collect_paths(&cell.blocks, &inner, depth + 1, out);
+                }
+            }
+        }
+    }
 }
 
 fn collect(blocks: &Blocks, prefix: &[u32], depth: usize, out: &mut Vec<TableRef>) {

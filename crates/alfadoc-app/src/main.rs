@@ -7,12 +7,23 @@
 
 mod ctxstate;
 mod data_view;
+mod external;
+#[cfg(not(target_arch = "wasm32"))]
 mod graphics;
 mod hosts;
 mod linking;
 mod package;
 mod shell;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
+/// The browser build starts from `web::start`; this binary has no native entry point there.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    web::start();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let start = shell::Tab::from_args(std::env::args().skip(1));
     let startup = shell::Tab::file_from_args(std::env::args().skip(1));

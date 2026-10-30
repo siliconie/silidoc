@@ -104,6 +104,44 @@ impl<S: BorrowMut<Session>> DeckEngine<S> {
         result
     }
 
+    /// How many tables the presentation holds, named or not.
+    pub fn table_count(&self) -> Result<usize, BridgeError> {
+        Ok(self.all_tables()?.len())
+    }
+
+    /// Names the `nth` table (1-based, slide by slide) and returns the id of its slide.
+    pub fn name_nth_table(&mut self, nth: usize, name: &str) -> Result<String, BridgeError> {
+        let all = self.all_tables()?;
+        let (slide_index, shape, slide_id) = nth
+            .checked_sub(1)
+            .and_then(|i| all.get(i))
+            .cloned()
+            .ok_or_else(|| BridgeError::AnchorNotFound(format!("the presentation has {} table(s); there is no table {nth}", all.len())))?;
+        self.name_table(slide_index, shape, name)?;
+        Ok(slide_id)
+    }
+
+    /// (slide index, shape id, slide id) of every table.
+    fn all_tables(&self) -> Result<Vec<(usize, u32, String)>, BridgeError> {
+        fn walk(shapes: &[Shape], slide_index: usize, slide_id: &str, depth: usize, out: &mut Vec<(usize, u32, String)>) {
+            if depth > MAX_GROUP_DEPTH {
+                return;
+            }
+            for s in shapes {
+                if matches!(s.kind, ShapeKind::Table(_)) {
+                    out.push((slide_index, s.id.0, slide_id.to_string()));
+                }
+                walk(s.children(), slide_index, slide_id, depth + 1, out);
+            }
+        }
+        let doc = self.s().doc().map_err(map_err)?;
+        let mut out = vec![];
+        for (i, slide) in doc.doc.slides.iter().enumerate() {
+            walk(&slide.shapes, i, &slide.id.to_string(), 0, &mut out);
+        }
+        Ok(out)
+    }
+
     fn run(&mut self, id: &str, params: &Json) -> Result<Json, BridgeError> {
         self.sm().execute(id, params).map_err(map_err)
     }

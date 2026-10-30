@@ -1,0 +1,11 @@
+# Build with:  trunk build --release        (from crates/alfadoc-app)
+# Try it with: trunk serve --release        then open http://127.0.0.1:8772
+[build]
+target = "index.html"
+dist = "../../dist/web"
+public_url = "./"
+filehash = true
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8772
