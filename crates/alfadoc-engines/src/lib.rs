@@ -6,3 +6,4 @@
 
 pub use alfadoc_adapter_deck as deck;
 pub use alfadoc_adapter_grid as grid;
+pub use alfadoc_adapter_word as word;

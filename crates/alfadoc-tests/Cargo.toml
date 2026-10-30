@@ -1,0 +1,21 @@
+[package]
+name = "alfadoc-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Cross-crate tests: links across the real engines, and what survives a trip through .xlsx, .docx, .pptx and .alfadoc files"
+
+[lints]
+workspace = true
+
+[dependencies]
+alfadoc-model = { workspace = true }
+alfadoc-bridge = { workspace = true }
+alfadoc-sync = { workspace = true }
+alfadoc-adapter-grid = { workspace = true }
+alfadoc-adapter-deck = { workspace = true }
+alfadoc-adapter-word = { workspace = true }
+wordcraft-engine = { workspace = true }
+serde_json = { workspace = true }

@@ -30,3 +30,23 @@ data between tabs (M2).
 2. A Word dialog or document window that does not draw in place: the embed switch in `main.rs`.
 3. Window title not following the active document: each engine sets the title for its own document.
 4. Start-up time and memory of the Document tab: this is the measurement the roadmap's spike asks for.
+
+## Links
+
+The **Links** button opens a window to join two editors. Each end is one of:
+
+* **Sheet**: a sheet name and range (the *Use selection* button fills them from the current selection). The range becomes a workbook defined name `alfadoc_<id>`.
+* **Document**: the table the caret is in. Its Alt Text description is set to `alfadoc:link=<id>`.
+* **Slides**: the table selected on the current slide. It is renamed `alfadoc_<id>` in the Selection Pane.
+
+Both tags are stored in the files, so a link survives a round trip through Excel, Word and PowerPoint. On creation, end A's content wins. After that the shell watches the editors: when something changes and stays quiet for 0.6 s, each link is merged three ways against its last agreed contents and only the difference is written, through each editor's own commands (Undo works on it). A cell changed on both sides is left alone and shown as a conflict, with **Keep A** / **Keep B** in the window. Links are saved with the `.alfadoc` file.
+
+Limits for now: the two ends must be in different editors; both editors must have been opened this session; each changed cell is one undo step in Document and Slides; dates reach a sheet as serial numbers.
+
+### Data end (maix)
+
+Either end of a link can also be **Data**: a named sheet and range of the shared maix store inside the package (for example `Costs`, `A1:C10`). Link a sheet range to Data, then a slide table to the same Data range, and the sheet and the slide stay equal through it, with every change recorded in the maix history. The data store is saved with the `.alfadoc` file.
+
+### Data tab (Alt+4)
+
+The **Data** tab shows the shared store as a grid. Pick or add a data sheet, type into any cell, and every link attached to those cells updates its sheet, document table or slide table once typing stops. `12` is stored as a number, `007` as text. Cells cleared here are stored as empty (the store keeps its history).

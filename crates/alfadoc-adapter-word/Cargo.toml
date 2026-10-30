@@ -1,0 +1,17 @@
+[package]
+name = "alfadoc-adapter-word"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "WordCraft behind Alfadoc's Engine and RegionAccess traits: tagged tables in a document, with contract tests for the WordCraft surface Alfadoc uses"
+
+[lints]
+workspace = true
+
+[dependencies]
+alfadoc-bridge = { workspace = true }
+alfadoc-model = { workspace = true }
+serde_json = { workspace = true }
+wordcraft-engine = { workspace = true }

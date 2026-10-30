@@ -12,6 +12,7 @@
 //! adapter goes to the table's slide and returns to the slide the user was on.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+use std::borrow::BorrowMut;
 use alfadoc_bridge::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess, textcell};
 use alfadoc_model::Anchor;
 use deckcraft_engine::model::{Shape, ShapeId, ShapeKind, SlideId};
@@ -33,8 +34,10 @@ pub struct TableRef {
     pub cols: usize,
 }
 
-pub struct DeckEngine {
-    session: Session,
+/// `S` is the session it works on: an owned [`Session`] (the default), or `&mut Session` to work on
+/// the one a live editor window holds ([`DeckEngine::borrowed`]).
+pub struct DeckEngine<S = Session> {
+    session: S,
 }
 
 impl Default for DeckEngine {
@@ -52,19 +55,38 @@ impl DeckEngine {
     pub fn from_session(session: Session) -> Self {
         DeckEngine { session }
     }
+}
+
+impl<'a> DeckEngine<&'a mut Session> {
+    /// Works on a session somebody else owns, for as long as the borrow lasts.
+    pub fn borrowed(session: &'a mut Session) -> Self {
+        DeckEngine { session }
+    }
+}
+
+impl<S: BorrowMut<Session>> DeckEngine<S> {
+    fn s(&self) -> &Session {
+        let r: &Session = self.session.borrow();
+        r
+    }
+
+    fn sm(&mut self) -> &mut Session {
+        let r: &mut Session = self.session.borrow_mut();
+        r
+    }
 
     pub fn session(&self) -> &Session {
-        &self.session
+        self.s()
     }
 
     pub fn session_mut(&mut self) -> &mut Session {
-        &mut self.session
+        self.sm()
     }
 
     /// Every table in the presentation that has a name, in slide order (top-level shapes and
     /// shapes inside groups).
     pub fn tables(&self) -> Result<Vec<TableRef>, BridgeError> {
-        let doc = self.session.doc().map_err(map_err)?;
+        let doc = self.s().doc().map_err(map_err)?;
         let mut out = vec![];
         for (slide_index, slide) in doc.doc.slides.iter().enumerate() {
             collect_tables(&slide.shapes, &slide.id.to_string(), slide_index, 0, &mut out);
@@ -83,11 +105,11 @@ impl DeckEngine {
     }
 
     fn run(&mut self, id: &str, params: &Json) -> Result<Json, BridgeError> {
-        self.session.execute(id, params).map_err(map_err)
+        self.sm().execute(id, params).map_err(map_err)
     }
 
     fn current_slide(&self) -> Result<usize, BridgeError> {
-        Ok(self.session.doc().map_err(map_err)?.selection.slide)
+        Ok(self.s().doc().map_err(map_err)?.selection.slide)
     }
 
     fn go(&mut self, index: usize) -> Result<(), BridgeError> {
@@ -102,10 +124,16 @@ impl DeckEngine {
             return Err(BridgeError::Unsupported("DeckCraft links are anchored by slide id and shape name".into()));
         };
         let id: u32 = slide_id.parse().map_err(|_| BridgeError::AnchorNotFound(format!("`{slide_id}` is not a slide id")))?;
-        let doc = self.session.doc().map_err(map_err)?;
-        let slide_index = doc.doc.slide_index(SlideId(id)).ok_or_else(|| BridgeError::AnchorNotFound(format!("no slide {id}")))?;
+        let doc = self.s().doc().map_err(map_err)?;
+        // The slide id is only a hint: a presentation that went through a file may number its
+        // slides differently. The shape name is what identifies the table, so when the hinted
+        // slide has no such shape the other slides are searched.
+        let hinted = doc.doc.slide_index(SlideId(id)).filter(|i| doc.doc.slides.get(*i).is_some_and(|s| find_named(&s.shapes, shape_name, 0).is_some()));
+        let slide_index = hinted
+            .or_else(|| doc.doc.slides.iter().position(|s| find_named(&s.shapes, shape_name, 0).is_some()))
+            .ok_or_else(|| BridgeError::AnchorNotFound(format!("no slide has a shape named `{shape_name}` (looked first on slide {id})")))?;
         let slide = doc.doc.slides.get(slide_index).ok_or_else(|| BridgeError::AnchorNotFound(format!("no slide {id}")))?;
-        let shape = find_named(&slide.shapes, shape_name, 0).ok_or_else(|| BridgeError::AnchorNotFound(format!("slide {id} has no shape named `{shape_name}`")))?;
+        let shape = find_named(&slide.shapes, shape_name, 0).ok_or_else(|| BridgeError::AnchorNotFound(format!("no shape named `{shape_name}`")))?;
         let ShapeKind::Table(table) = &shape.kind else {
             return Err(BridgeError::AnchorNotFound(format!("`{shape_name}` is not a table")));
         };
@@ -152,7 +180,7 @@ fn collect_tables(shapes: &[Shape], slide_id: &str, slide_index: usize, depth: u
     }
 }
 
-impl Engine for DeckEngine {
+impl<S: BorrowMut<Session>> Engine for DeckEngine<S> {
     fn kind(&self) -> EngineKind {
         EngineKind::Deck
     }
@@ -167,14 +195,14 @@ impl Engine for DeckEngine {
     }
 
     fn revision(&self) -> Option<u64> {
-        self.session.active().map(|d| d.revision)
+        self.s().active().map(|d| d.revision)
     }
 }
 
-impl RegionAccess for DeckEngine {
+impl<S: BorrowMut<Session>> RegionAccess for DeckEngine<S> {
     fn read_region(&self, anchor: &Anchor) -> Result<Region, BridgeError> {
         let found = self.resolve(anchor)?;
-        let doc = self.session.doc().map_err(map_err)?;
+        let doc = self.s().doc().map_err(map_err)?;
         let slide = doc.doc.slides.get(found.slide_index).ok_or_else(|| BridgeError::AnchorNotFound("slide vanished".into()))?;
         let shape = deckcraft_engine::model::find_shape(&slide.shapes, found.shape).ok_or_else(|| BridgeError::AnchorNotFound("table vanished".into()))?;
         let ShapeKind::Table(table) = &shape.kind else {
@@ -313,9 +341,15 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_slide_id_still_finds_the_named_table() {
+        let (d, _) = deck_with_table();
+        assert_eq!(d.read_region(&anchor("424242", "sales")).unwrap().cells.len(), 0);
+    }
+
+    #[test]
     fn unknown_anchors_are_errors_not_panics() {
         let (d, _) = deck_with_table();
-        assert!(matches!(d.read_region(&anchor("999999", "sales")), Err(BridgeError::AnchorNotFound(_))));
+        assert!(matches!(d.read_region(&anchor("999999", "missing")), Err(BridgeError::AnchorNotFound(_))));
         assert!(matches!(d.read_region(&anchor("x", "sales")), Err(BridgeError::AnchorNotFound(_))));
         assert!(matches!(d.read_region(&Anchor::GridName { name: "n".into() }), Err(BridgeError::Unsupported(_))));
     }

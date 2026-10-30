@@ -1,14 +1,21 @@
 //! Alfadoc: GridCraft, WordCraft and DeckCraft in one window.
 //!
-//! `alfadoc [--tab sheet|doc|slides]`
+//! `alfadoc [--tab sheet|doc|slides|data] [file.alfadoc]`
+//!
+//! Release builds on Windows run without a console window.
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod ctxstate;
+mod data_view;
 mod graphics;
 mod hosts;
+mod linking;
+mod package;
 mod shell;
 
 fn main() -> eframe::Result {
     let start = shell::Tab::from_args(std::env::args().skip(1));
+    let startup = shell::Tab::file_from_args(std::env::args().skip(1));
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Alfadoc")
@@ -25,7 +32,7 @@ fn main() -> eframe::Result {
             // WordCraft opens each document in its own OS window when it can. Alfadoc has one
             // window with tabs, so ask egui to draw every "extra window" inside this one.
             cc.egui_ctx.set_embed_viewports(true);
-            Ok(Box::new(shell::Shell::new(start)))
+            Ok(Box::new(shell::Shell::new(start, startup)))
         }),
     )
 }

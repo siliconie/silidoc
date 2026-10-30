@@ -6,6 +6,7 @@
 //! data/maix.json      the maix store (JSON-records profile)
 //! links.json          the link registry
 //! document/…          word-processor parts (WordCraft model)
+//! sheets/…            spreadsheet parts (GridCraft model)
 //! slides/…            presentation parts (DeckCraft model)
 //! assets/…            pictures and other binaries
 //! ```
@@ -93,7 +94,7 @@ pub fn validate_entry_name(name: &str) -> Result<()> {
 const RESERVED: [&str; 4] = ["mimetype", "manifest.json", "data/maix.json", "links.json"];
 
 fn is_part_name(name: &str) -> bool {
-    name.starts_with("document/") || name.starts_with("slides/") || name.starts_with("assets/")
+    name.starts_with("document/") || name.starts_with("sheets/") || name.starts_with("slides/") || name.starts_with("assets/")
 }
 
 impl Alfadoc {

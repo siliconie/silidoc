@@ -17,6 +17,11 @@ path = "src/main.rs"
 
 [dependencies]
 alfadoc-model = { workspace = true }
+alfadoc-bridge = { workspace = true }
+alfadoc-sync = { workspace = true }
+alfadoc-adapter-grid = { workspace = true }
+alfadoc-adapter-deck = { workspace = true }
+alfadoc-adapter-word = { workspace = true }
 gridcraft-engine = { workspace = true }
 gridcraft-ui-egui = { workspace = true }
 wordcraft-engine = { workspace = true }
@@ -28,3 +33,6 @@ egui = { workspace = true }
 rfd = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

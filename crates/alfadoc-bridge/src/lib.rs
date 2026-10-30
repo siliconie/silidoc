@@ -9,8 +9,10 @@
 pub mod dispatch;
 pub mod engine;
 pub mod link_sync;
+pub mod maix_access;
 pub mod textcell;
 
 pub use dispatch::{Change, Dispatcher};
 pub use engine::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess};
 pub use link_sync::{Outcome, sync_link};
+pub use maix_access::MaixAccess;

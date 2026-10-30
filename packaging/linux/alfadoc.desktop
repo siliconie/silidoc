@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Alfadoc
+Comment=Documents, spreadsheets and presentations in one app
+Exec=alfadoc %f
+Icon=alfadoc
+Terminal=false
+Categories=Office;WordProcessor;Spreadsheet;Presentation;
+MimeType=application/vnd.alfadoc+zip;

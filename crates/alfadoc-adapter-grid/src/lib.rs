@@ -9,6 +9,7 @@
 //! are stored in the `.xlsx` file, follow the cells when rows or columns are inserted, and are what
 //! Excel itself shows in its Name Manager, so a link survives a round trip through Excel.
 
+use std::borrow::BorrowMut;
 use alfadoc_bridge::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess};
 use alfadoc_model::{Anchor, Value};
 use gridcraft_engine::core::{
@@ -23,8 +24,10 @@ use serde_json::{Value as Json, json};
 pub const MAX_REGION_CELLS: u64 = 1_000_000;
 
 /// One open GridCraft session (a workbook, plus the engine's undo history and journal).
-pub struct GridEngine {
-    session: Session,
+/// `S` is the session it works on: an owned [`Session`] (the default), or `&mut Session` to work on
+/// the one a live editor window holds ([`GridEngine::borrowed`]).
+pub struct GridEngine<S = Session> {
+    session: S,
 }
 
 impl Default for GridEngine {
@@ -44,13 +47,32 @@ impl GridEngine {
     pub fn from_session(session: Session) -> Self {
         GridEngine { session }
     }
+}
+
+impl<'a> GridEngine<&'a mut Session> {
+    /// Works on a session somebody else owns, for as long as the borrow lasts.
+    pub fn borrowed(session: &'a mut Session) -> Self {
+        GridEngine { session }
+    }
+}
+
+impl<S: BorrowMut<Session>> GridEngine<S> {
+    fn s(&self) -> &Session {
+        let r: &Session = self.session.borrow();
+        r
+    }
+
+    fn sm(&mut self) -> &mut Session {
+        let r: &mut Session = self.session.borrow_mut();
+        r
+    }
 
     pub fn session(&self) -> &Session {
-        &self.session
+        self.s()
     }
 
     pub fn session_mut(&mut self) -> &mut Session {
-        &mut self.session
+        self.sm()
     }
 
     /// Defines (or redefines) the workbook-level name `name` as `sheet`!`range`, e.g.
@@ -64,7 +86,7 @@ impl GridEngine {
     }
 
     fn run(&mut self, id: &str, params: &Json) -> Result<Json, BridgeError> {
-        self.session.execute(id, params.clone()).map_err(map_err)
+        self.sm().execute(id, params.clone()).map_err(map_err)
     }
 
     /// Where the anchor points: (sheet index, rectangle on that sheet).
@@ -72,7 +94,7 @@ impl GridEngine {
         let Anchor::GridName { name } = anchor else {
             return Err(BridgeError::Unsupported("GridCraft links are anchored by a defined name".into()));
         };
-        let doc = self.session.doc().map_err(map_err)?;
+        let doc = self.s().doc().map_err(map_err)?;
         let wb = &doc.wb;
         let def = wb
             .names
@@ -91,7 +113,7 @@ impl GridEngine {
     }
 }
 
-impl Engine for GridEngine {
+impl<S: BorrowMut<Session>> Engine for GridEngine<S> {
     fn kind(&self) -> EngineKind {
         EngineKind::Grid
     }
@@ -107,14 +129,14 @@ impl Engine for GridEngine {
 
     /// `DocState::revision`: moves only when the workbook really changed.
     fn revision(&self) -> Option<u64> {
-        self.session.active().map(|d| d.revision)
+        self.s().active().map(|d| d.revision)
     }
 }
 
-impl RegionAccess for GridEngine {
+impl<S: BorrowMut<Session>> RegionAccess for GridEngine<S> {
     fn read_region(&self, anchor: &Anchor) -> Result<Region, BridgeError> {
         let (index, range) = self.resolve(anchor)?;
-        let doc = self.session.doc().map_err(map_err)?;
+        let doc = self.s().doc().map_err(map_err)?;
         let sheet = doc.wb.sheet(index).ok_or_else(|| BridgeError::AnchorNotFound("sheet vanished".into()))?;
         let mut region = Region::default();
         for at in range.iter() {
@@ -143,7 +165,7 @@ impl RegionAccess for GridEngine {
             work.push((at, to_json(ch.value.as_ref()), literal_equals));
         }
         work.sort_by_key(|(at, _, _)| *at);
-        self.session
+        self.sm()
             .grouped("Alfadoc sync", |s| {
                 let mut run: Vec<Json> = vec![];
                 let mut run_start = CellRef::default();

@@ -1,0 +1,97 @@
+# Builds Alfadoc for Windows, macOS and Linux when a tag like v0.1.0 is pushed (or on demand),
+# and attaches the files to a GitHub release.
+#
+# Alfadoc needs the three engines checked out beside it (see docs/UPSTREAM.md). Set the
+# repositories below to where your copies live; if they are private, add a repository secret
+# ENGINES_TOKEN (a personal access token that can read them).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  GRIDCRAFT_REPO: storytold/gridcraft
+  WORDCRAFT_REPO: storytold/wordcraft
+  DECKCRAFT_REPO: storytold/deckcraft
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: macos
+          - os: ubuntu-latest
+            name: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out Alfadoc
+        uses: actions/checkout@v4
+        with:
+          path: alfadoc
+
+      - name: Check out the engines beside it
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.ENGINES_TOKEN }}
+        run: |
+          auth=""
+          if [ -n "$TOKEN" ]; then auth="x-access-token:${TOKEN}@"; fi
+          git clone --depth 1 "https://${auth}github.com/${GRIDCRAFT_REPO}.git" gridcraft
+          git clone --depth 1 "https://${auth}github.com/${WORDCRAFT_REPO}.git" wordcraft
+          git clone --depth 1 "https://${auth}github.com/${DECKCRAFT_REPO}.git" deckcraft
+
+      - name: Install Linux build libraries
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: alfadoc
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        working-directory: alfadoc
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          powershell -File packaging\windows\build.ps1
+
+      - name: Build (macOS)
+        if: matrix.os == 'macos-latest'
+        working-directory: alfadoc
+        run: bash packaging/macos/build.sh
+
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: alfadoc
+        run: bash packaging/linux/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alfadoc-${{ matrix.name }}
+          path: |
+            alfadoc/dist/*.exe
+            alfadoc/dist/*.zip
+            alfadoc/dist/*.tar.gz
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            alfadoc/dist/*.exe
+            alfadoc/dist/*.zip
+            alfadoc/dist/*.tar.gz

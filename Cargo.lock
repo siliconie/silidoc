@@ -170,10 +170,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "alfadoc-adapter-word"
+version = "0.1.0"
+dependencies = [
+ "alfadoc-bridge",
+ "alfadoc-model",
+ "serde_json",
+ "wordcraft-engine",
+]
+
+[[package]]
 name = "alfadoc-app"
 version = "0.1.0"
 dependencies = [
+ "alfadoc-adapter-deck",
+ "alfadoc-adapter-grid",
+ "alfadoc-adapter-word",
+ "alfadoc-bridge",
  "alfadoc-model",
+ "alfadoc-sync",
  "deckcraft-engine",
  "deckcraft-ui-egui",
  "eframe",
@@ -183,6 +198,7 @@ dependencies = [
  "log",
  "rfd",
  "serde_json",
+ "winresource",
  "wordcraft-engine",
  "wordcraft-ui-egui",
 ]
@@ -204,6 +220,7 @@ version = "0.1.0"
 dependencies = [
  "alfadoc-adapter-deck",
  "alfadoc-adapter-grid",
+ "alfadoc-adapter-word",
  "deckcraft-engine",
  "deckcraft-ui-egui",
  "gridcraft-engine",
@@ -231,6 +248,20 @@ dependencies = [
  "alfadoc-model",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "alfadoc-tests"
+version = "0.1.0"
+dependencies = [
+ "alfadoc-adapter-deck",
+ "alfadoc-adapter-grid",
+ "alfadoc-adapter-word",
+ "alfadoc-bridge",
+ "alfadoc-model",
+ "alfadoc-sync",
+ "serde_json",
+ "wordcraft-engine",
 ]
 
 [[package]]
@@ -6027,6 +6058,16 @@ checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
 dependencies = [
  "cfg-if",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]
