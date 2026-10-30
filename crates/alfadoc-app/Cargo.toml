@@ -1,0 +1,30 @@
+[package]
+name = "alfadoc-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Alfadoc desktop app: GridCraft, WordCraft and DeckCraft in one window"
+default-run = "alfadoc"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "alfadoc"
+path = "src/main.rs"
+
+[dependencies]
+alfadoc-model = { workspace = true }
+gridcraft-engine = { workspace = true }
+gridcraft-ui-egui = { workspace = true }
+wordcraft-engine = { workspace = true }
+wordcraft-ui-egui = { workspace = true }
+deckcraft-engine = { workspace = true }
+deckcraft-ui-egui = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard", "wayland", "x11"] }
+egui = { workspace = true }
+rfd = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }

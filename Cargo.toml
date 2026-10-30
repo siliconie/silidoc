@@ -6,6 +6,7 @@ members = [
     "crates/alfadoc-bridge",
     "crates/alfadoc-adapter-grid",
     "crates/alfadoc-engines",
+    "crates/alfadoc-app",
 ]
 # A plain `cargo test` / `cargo build` covers only the light data-layer crates. The engines (hundreds of
 # thousands of lines plus the GPU/UI stack) are built with `--workspace` or `-p alfadoc-engines`.
@@ -32,6 +33,11 @@ alfadoc-adapter-grid = { path = "crates/alfadoc-adapter-grid" }
 
 # The three engines are sibling checkouts (D:\artcraft\gridcraft, ...), used as path dependencies:
 # no versions, no revs. To update an engine, `git pull` in its folder (docs/UPSTREAM.md).
+# UI host (alfadoc-app). The egui family resolves to the ArtCraft fork through [patch.crates-io] below.
+egui = "0.37"
+eframe = { version = "0.37", default-features = false }
+rfd = "0.17"
+log = "0.4"
 gridcraft-engine = { path = "../gridcraft/crates/engine" }
 gridcraft-ui-egui = { path = "../gridcraft/crates/ui-egui" }
 wordcraft-engine = { path = "../wordcraft/crates/engine" }

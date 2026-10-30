@@ -14,7 +14,7 @@ Ordered by dependency. Each milestone ends with something that runs and is teste
 1. ✅ Engines are sibling path dependencies; the full workspace (three engines + UI stack) builds and passes on Windows.
 2. ✅ `alfadoc-adapter-grid`: `Engine` + `RegionAccess` over GridCraft, anchored by a defined name; writes go through `range.setValues` / `cell.set` in one undo group; contract tests pin every command and field used. The `Engine` trait gained an optional `revision()` (GridCraft and DeckCraft expose one), which the dispatcher prefers over command flags.
 3. `alfadoc-adapter-deck` (tables on slides, anchored by shape name/tag; DeckCraft has `revision` and shape `tags`), then `alfadoc-adapter-word` (content-control tables). maix ↔ sheet adapter for the in-file store.
-4. **Spike:** can `WordApp`, `SheetApp` and `SlideApp` be shown in tabs of one egui app? Measure font-database memory and startup. Decide shared-fonts work from the numbers.
+4. 🔶 **Spike / first window:** `alfadoc-app` shows `SheetApp`, `WordApp` and `SlideApp` in tabs of one egui window (docs/SHELL.md). Written, awaiting its first run: measure start-up and memory of the Document tab and decide shared-fonts work from the numbers.
 5. `alfadoc-app`: desktop shell, tabs, drawer, toasts; open/save `.alfadoc`; web build via Trunk.
 
 ## M2 — Live links inside one file

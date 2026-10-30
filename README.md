@@ -24,7 +24,7 @@ Data is shared between all three and stays in sync with the files you import it 
 
 Milestone M0 is done: the data model, `.alfadoc` container, maix store, link registry, three-way
 merge and link-sync core are implemented and tested (42 tests), and the workspace resolves together
-with all three engines on one egui. The GridCraft adapter is done (M1); the Deck and Word adapters and the app shell are next.
+with all three engines on one egui. The GridCraft adapter is done (M1) and the first window exists (`alfadoc-app`: Sheet, Document and Slides tabs, docs/SHELL.md); the Deck and Word adapters are next.
 
 Expected layout (see [UPSTREAM](docs/UPSTREAM.md)): `alfadoc` next to `gridcraft`, `wordcraft`, `deckcraft`.
 
@@ -32,6 +32,13 @@ Expected layout (see [UPSTREAM](docs/UPSTREAM.md)): `alfadoc` next to `gridcraft
 cargo test                      # data-layer crates only: fast, light on memory
 cargo test --workspace          # also builds the three engines and their UI stack (heavy, first run is long)
 cargo clippy --workspace --all-targets -- -D warnings
+```
+
+### Run it
+
+```
+cargo run -p alfadoc-app -j 2            # opens the Alfadoc window on the Sheet tab
+cargo run -p alfadoc-app -j 2 -- --tab doc
 ```
 
 ### Troubleshooting (Windows): "paging file is too small" / "out of memory" / `STATUS_STACK_BUFFER_OVERRUN`
