@@ -1,0 +1,87 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/alfadoc-model",
+    "crates/alfadoc-sync",
+    "crates/alfadoc-bridge",
+    "crates/alfadoc-engines",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+repository = "https://github.com/alfasiliconn/alfadoc"
+publish = false
+
+[workspace.dependencies]
+# internal
+alfadoc-model = { path = "crates/alfadoc-model" }
+alfadoc-sync = { path = "crates/alfadoc-sync" }
+alfadoc-bridge = { path = "crates/alfadoc-bridge" }
+
+# The three engines are sibling checkouts (D:\artcraft\gridcraft, ...), used as path dependencies:
+# no versions, no revs. To update an engine, `git pull` in its folder (docs/UPSTREAM.md).
+gridcraft-engine = { path = "../gridcraft/crates/engine" }
+gridcraft-ui-egui = { path = "../gridcraft/crates/ui-egui" }
+wordcraft-engine = { path = "../wordcraft/crates/engine" }
+wordcraft-ui-egui = { path = "../wordcraft/crates/ui-egui" }
+deckcraft-engine = { path = "../deckcraft/crates/engine" }
+deckcraft-ui-egui = { path = "../deckcraft/crates/ui-egui" }
+
+# foundation (versions match the engines')
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+zip = { version = "3", default-features = false, features = ["deflate"] }
+sha2 = { version = "0.11", default-features = false }
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = 0
+
+# [patch] is honoured ONLY in the root workspace, so the engines' own patch tables do nothing here.
+# This is the union of theirs: egui + winit forks (identical in all three engines), and krilla
+# (WordCraft and DeckCraft; required by craft-pdf). Keep it equal to the engines' tables.
+[patch.crates-io]
+krilla = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_demo_lib = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_inspection = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }

@@ -1,0 +1,67 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The workspace refers to the engines as sibling folders (../gridcraft …), so CI checks all four
+# repositories out side by side and puts the engines at the commits recorded in UPSTREAM.lock.
+# Replace the `repository:` owners below with wherever your clones live (upstream or your forks).
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: alfadoc
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: alfadoc }
+      - uses: actions/checkout@v4
+        with: { repository: storytold/gridcraft, path: gridcraft, fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: storytold/wordcraft, path: wordcraft, fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: storytold/deckcraft, path: deckcraft, fetch-depth: 0 }
+      - name: Use the engine commits recorded in UPSTREAM.lock
+        run: |
+          if [ -f UPSTREAM.lock ]; then
+            while read -r name sha; do git -C "../$name" checkout --quiet "$sha"; done < UPSTREAM.lock
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: alfadoc }
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  wasm:
+    # The data layer must keep building for the web (engines/UI join this check in M1).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: alfadoc
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: alfadoc }
+      - uses: actions/checkout@v4
+        with: { repository: storytold/gridcraft, path: gridcraft, fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: storytold/wordcraft, path: wordcraft, fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: storytold/deckcraft, path: deckcraft, fetch-depth: 0 }
+      - name: Use the engine commits recorded in UPSTREAM.lock
+        run: |
+          if [ -f UPSTREAM.lock ]; then
+            while read -r name sha; do git -C "../$name" checkout --quiet "$sha"; done < UPSTREAM.lock
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: alfadoc }
+      - run: cargo check -p alfadoc-model -p alfadoc-sync -p alfadoc-bridge --target wasm32-unknown-unknown

@@ -1,0 +1,19 @@
+[package]
+name = "alfadoc-engines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The three engines (GridCraft, WordCraft, DeckCraft) as one dependency set; adapters and contract tests land here in M1"
+
+[lints]
+workspace = true
+
+[dependencies]
+gridcraft-engine = { workspace = true }
+gridcraft-ui-egui = { workspace = true }
+wordcraft-engine = { workspace = true }
+wordcraft-ui-egui = { workspace = true }
+deckcraft-engine = { workspace = true }
+deckcraft-ui-egui = { workspace = true }

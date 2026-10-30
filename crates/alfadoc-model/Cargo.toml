@@ -1,0 +1,18 @@
+[package]
+name = "alfadoc-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The .alfadoc container, maix store, dimensions and link registry"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+zip = { workspace = true }
+xxhash-rust = { workspace = true }
+sha2 = { workspace = true }

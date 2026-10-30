@@ -1,0 +1,3 @@
+/target
+*.alfadoc.lock
+.DS_Store
