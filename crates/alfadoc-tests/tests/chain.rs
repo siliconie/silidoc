@@ -39,8 +39,8 @@ fn world() -> World {
     let sheet = maix.add_sheet("Costs");
     let data_anchor = Anchor::Maix { sheet, top: 0, left: 0, bottom: 2, right: 1, dims: DimVector::new() };
 
-    let l1 = Link { id: "L1".into(), a: endpoint("sheets/main.xlsx", &grid_anchor), b: endpoint("data/maix", &data_anchor), mode: SyncMode::Mirror, base: None };
-    let l2 = Link { id: "L2".into(), a: endpoint("data/maix", &data_anchor), b: endpoint("slides/main.pptx", &deck_anchor), mode: SyncMode::Mirror, base: None };
+    let l1 = Link { id: "L1".into(), a: endpoint("sheets/main.xlsx", &grid_anchor), b: endpoint("data/maix", &data_anchor), mode: SyncMode::Mirror, base: None, name: String::new(), paused: false, created: 0 };
+    let l2 = Link { id: "L2".into(), a: endpoint("data/maix", &data_anchor), b: endpoint("slides/main.pptx", &deck_anchor), mode: SyncMode::Mirror, base: None, name: String::new(), paused: false, created: 0 };
     World { grid, deck, maix, grid_anchor, deck_anchor, data_anchor, l1, l2 }
 }
 

@@ -11,12 +11,12 @@
 //! * **Conflicts.** A cell changed on both sides in the same quiet period is left alone on both
 //!   and counted; the Links window offers "Keep A" and "Keep B".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use alfadoc_adapter_deck::DeckEngine;
 use alfadoc_adapter_grid::GridEngine;
 use alfadoc_adapter_word::WordEngine;
-use alfadoc_bridge::{MaixAccess, RegionAccess, sync_link};
+use alfadoc_bridge::{MaixAccess, RegionAccess, TableChoice, sync_link};
 use alfadoc_model::links::link_tag;
 use alfadoc_model::{Anchor, Endpoint, Link, SyncMode, Target, Value};
 use alfadoc_sync::{Debouncer, Policy};
@@ -61,7 +61,7 @@ impl Place {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Place::Sheet => "Sheet",
             Place::Document => "Document",
@@ -88,6 +88,10 @@ pub struct Side {
     pub path: String,
     /// Which table (1, 2, …) of a `.docx` or `.pptx` file, used when `place` is a file.
     pub table: String,
+    /// Which table of the open document or deck (1, 2, …), or 0 for the one that is selected.
+    pub pick: usize,
+    /// A document end that is a field in a sentence (the selected words) rather than a table.
+    pub field: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,7 +107,7 @@ pub struct LinkDraft {
 
 impl Default for LinkDraft {
     fn default() -> Self {
-        let side = |place| Side { place, sheet: String::new(), range: String::new(), path: String::new(), table: "1".into() };
+        let side = |place| Side { place, sheet: String::new(), range: String::new(), path: String::new(), table: "1".into(), pick: 0, field: false };
         LinkDraft { open: false, a: side(Place::Sheet), b: side(Place::Slides), mode: SyncMode::Mirror, message: String::new(), resolving: None }
     }
 }
@@ -124,7 +128,7 @@ impl Clash {
         Clash { row: key.0, col: key.1, base: text(base), a: text(a), b: text(b) }
     }
 
-    fn address(&self) -> String {
+    pub(crate) fn address(&self) -> String {
         format!("{}{}", crate::data_view::column_name(self.col), self.row + 1)
     }
 }
@@ -139,9 +143,59 @@ pub struct Watch {
     last_poll: f64,
     /// Unresolved conflicts per link id, from the last sync.
     pub conflicts: HashMap<String, Vec<Clash>>,
+    /// Bumped whenever a sync pass ran or a link changed, so the Links tab knows to look again.
+    pub epoch: u64,
+    /// What happened to each link in this session, oldest first (not saved in the file).
+    pub log: HashMap<String, Vec<LogLine>>,
+    /// The last sync error per link id; gone after a sync that worked.
+    pub errors: HashMap<String, String>,
+    /// Links whose editors are not both open yet.
+    pub idle: HashSet<String>,
 }
 
+/// One line of a link's activity list.
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    pub at: u64,
+    pub text: String,
+}
+
+/// Most lines kept per link.
+const LOG_LIMIT: usize = 40;
+
 impl Watch {
+    /// Adds a line to a link's activity list.
+    pub fn note(&mut self, id: &str, at: u64, text: impl Into<String>) {
+        let text = text.into();
+        let lines = self.log.entry(id.to_string()).or_default();
+        if text.starts_with("Error") && lines.last().is_some_and(|l| l.text == text) {
+            return;
+        }
+        lines.push(LogLine { at, text });
+        if lines.len() > LOG_LIMIT {
+            lines.remove(0);
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    /// Forgets what was kept about the links of a package that has been replaced.
+    pub fn reset_links(&mut self) {
+        self.conflicts.clear();
+        self.log.clear();
+        self.errors.clear();
+        self.idle.clear();
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    /// Forgets everything kept about a link that is gone.
+    pub fn forget(&mut self, id: &str) {
+        self.conflicts.remove(id);
+        self.log.remove(id);
+        self.errors.remove(id);
+        self.idle.remove(id);
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
     /// Asks for a sync pass soon (after a package was opened, say).
     pub fn request_sync(&mut self, now: u64) {
         self.debounce.event(now);
@@ -150,7 +204,7 @@ impl Watch {
 
 impl Default for Watch {
     fn default() -> Self {
-        Watch { grid: None, deck: None, word: None, data: 0, debounce: Debouncer::new(QUIET_MS, MAX_WAIT_MS), last_poll: 0.0, conflicts: HashMap::new() }
+        Watch { grid: None, deck: None, word: None, data: 0, debounce: Debouncer::new(QUIET_MS, MAX_WAIT_MS), last_poll: 0.0, conflicts: HashMap::new(), epoch: 0, log: HashMap::new(), errors: HashMap::new(), idle: HashSet::new() }
     }
 }
 
@@ -162,9 +216,11 @@ enum Action {
     Resolve(usize, u32, u16, bool),
     ResolveAll(usize, bool),
     Review(Option<String>),
+    MarkVariant,
+    KeepVariants,
 }
 
-fn place_of_endpoint(e: &Endpoint) -> Option<Place> {
+pub(crate) fn place_of_endpoint(e: &Endpoint) -> Option<Place> {
     match &e.target {
         Target::Internal { part } => Place::ALL.into_iter().find(|p| p.part() == part && *p != Place::File),
         Target::External { .. } => Some(Place::File),
@@ -192,7 +248,7 @@ fn parse_range(text: &str) -> Option<(u32, u16, u32, u16)> {
     Some((r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1)))
 }
 
-fn mode_name(mode: SyncMode) -> &'static str {
+pub(crate) fn mode_name(mode: SyncMode) -> &'static str {
     match mode {
         SyncMode::Mirror => "Both ways",
         SyncMode::AToB => "A to B",
@@ -220,6 +276,7 @@ impl Shell {
         }
         if self.watch.debounce.take(now) {
             let (wrote, conflicts, errors) = self.sync_all(now, Policy::Manual);
+            self.watch.epoch = self.watch.epoch.wrapping_add(1);
             self.signals_changed(); // our own writes are not new edits
             if let Some(e) = errors.first() {
                 self.say(ctx, format!("Link problem: {e}"));
@@ -260,11 +317,14 @@ impl Shell {
     /// Links chain (sheet ↔ data ↔ slide): a change that reaches the data store in one link is
     /// only passed on by the next link's turn, which may already have gone by. So the pass is
     /// repeated until nothing is written, at most `MAX_PASSES` times.
-    fn sync_all(&mut self, now: u64, policy: Policy) -> (usize, usize, Vec<String>) {
+    pub(crate) fn sync_all(&mut self, now: u64, policy: Policy) -> (usize, usize, Vec<String>) {
         let (mut wrote, mut conflicts, mut errors) = (0, 0, vec![]);
         for pass in 0..MAX_PASSES {
             let (mut wrote_now, mut conflicts_now) = (0, 0);
             for i in 0..self.package.links.len() {
+                if self.package.links.get(i).is_some_and(|l| l.paused) {
+                    continue;
+                }
                 match self.sync_one(i, policy, now) {
                     Ok(Some((w, c))) => {
                         wrote_now += w;
@@ -287,7 +347,7 @@ impl Shell {
     /// Runs `f` on link `index` with access to both of its ends. `Ok(None)` when one of the
     /// editors has not been opened yet. The link (with its new snapshot) is kept only when `f`
     /// succeeds; a changed linked file is written back either way.
-    fn run_link<R>(&mut self, index: usize, now: u64, f: impl FnOnce(&mut Link, &mut dyn RegionAccess, &mut dyn RegionAccess) -> Result<R, alfadoc_bridge::BridgeError>) -> Result<Option<R>, String> {
+    pub(crate) fn run_link<R>(&mut self, index: usize, now: u64, f: impl FnOnce(&mut Link, &mut dyn RegionAccess, &mut dyn RegionAccess) -> Result<R, alfadoc_bridge::BridgeError>) -> Result<Option<R>, String> {
         let Some(mut link) = self.package.links.get(index).cloned() else {
             return Ok(None);
         };
@@ -342,19 +402,43 @@ impl Shell {
     }
 
     /// Syncs link `index`; `Ok(None)` when one of its editors has not been opened yet.
-    fn sync_one(&mut self, index: usize, policy: Policy, now: u64) -> Result<Option<(usize, usize)>, String> {
-        let Some(outcome) = self.run_link(index, now, |link, a, b| sync_link(link, a, b, policy, now))? else {
-            return Ok(None);
-        };
+    pub(crate) fn sync_one(&mut self, index: usize, policy: Policy, now: u64) -> Result<Option<(usize, usize)>, String> {
         let id = self.package.links.get(index).map(|l| l.id.clone()).unwrap_or_default();
+        let outcome = match self.run_link(index, now, |link, a, b| sync_link(link, a, b, policy, now)) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => {
+                self.watch.idle.insert(id);
+                return Ok(None);
+            }
+            Err(e) => {
+                self.watch.note(&id, now, format!("Error: {e}"));
+                self.watch.errors.insert(id, e.clone());
+                return Err(e);
+            }
+        };
+        self.watch.idle.remove(&id);
+        self.watch.errors.remove(&id);
         let clashes: Vec<Clash> = outcome.conflicts.iter().map(|c| Clash::of(c.key, c.base.as_ref(), c.a.as_ref(), c.b.as_ref())).collect();
         let count = clashes.len();
+        if outcome.wrote_a + outcome.wrote_b > 0 || count > 0 {
+            let mut parts = vec![];
+            if outcome.wrote_a > 0 {
+                parts.push(format!("{} cell(s) written to A", outcome.wrote_a));
+            }
+            if outcome.wrote_b > 0 {
+                parts.push(format!("{} cell(s) written to B", outcome.wrote_b));
+            }
+            if count > 0 {
+                parts.push(format!("{count} conflict(s)"));
+            }
+            self.watch.note(&id, now, parts.join(", "));
+        }
         self.watch.conflicts.insert(id, clashes);
         Ok(Some((outcome.wrote_a + outcome.wrote_b, count)))
     }
 
     /// Settles one conflicting cell of link `index` with the chosen side's value.
-    fn resolve_clash(&mut self, index: usize, row: u32, col: u16, keep_a: bool) -> Result<(), String> {
+    pub(crate) fn resolve_clash(&mut self, index: usize, row: u32, col: u16, keep_a: bool) -> Result<(), String> {
         let now = package::now_ms();
         self.run_link(index, now, |link, a, b| alfadoc_bridge::resolve_cell(link, a, b, (row, col), keep_a, now))?;
         if let Some(id) = self.package.links.get(index).map(|l| l.id.clone())
@@ -426,11 +510,22 @@ impl Shell {
             }
             Place::Document => {
                 let app = self.word.as_mut().ok_or_else(|| missing(Place::Document))?;
-                WordEngine::borrowed(&mut app.session).tag_selected_table(&tag).map_err(|_| "Put the caret inside a table in the document first.".to_string())?;
+                let mut engine = WordEngine::borrowed(&mut app.session);
+                if side.field {
+                    engine.insert_field(&tag).map_err(|e| format!("Select the words in the document that should stay live first ({e})."))?;
+                } else if side.pick > 0 {
+                    engine.tag_table(side.pick, &tag).map_err(|e| e.to_string())?;
+                } else {
+                    engine.tag_selected_table(&tag).map_err(|_| "Put the caret inside a table in the document first, or pick a table from the list.".to_string())?;
+                }
                 Anchor::WordControl { tag }
             }
             Place::Slides => {
                 let app = self.deck.as_mut().ok_or_else(|| missing(Place::Slides))?;
+                if side.pick > 0 {
+                    let slide_id = DeckEngine::borrowed(&mut app.session).name_nth_table(side.pick, &name).map_err(|e| e.to_string())?;
+                    return Ok(Endpoint { target: Target::Internal { part: side.place.part().into() }, anchor: Anchor::DeckShape { slide_id, shape_name: name } });
+                }
                 let (slide_index, shape, slide_id) = {
                     let st = app.session.doc().map_err(|e| e.to_string())?;
                     let shape = st.selection.shapes.first().copied().ok_or("Select a table on a slide first.")?;
@@ -456,7 +551,7 @@ impl Shell {
         let id: String = full.chars().take(8).collect();
         let a = self.endpoint_for(&draft.a, &id)?;
         let b = self.endpoint_for(&draft.b, &id)?;
-        self.package.links.push(Link { id: id.clone(), a, b, mode: draft.mode, base: None });
+        self.package.links.push(Link::new(id.clone(), a, b, draft.mode, package::now_ms()));
         let index = self.package.links.len() - 1;
         // The first sync decides what the two ends start as: A's content wins.
         let first = self.sync_one(index, Policy::PreferA, package::now_ms());
@@ -605,6 +700,9 @@ impl Shell {
         let mut open = true;
         let mut actions: Vec<Action> = vec![];
         let mut draft = self.draft.clone();
+        let word_choices = self.word.as_mut().map(|a| WordEngine::borrowed(&mut a.session).table_choices()).unwrap_or_default();
+        let deck_choices = self.deck.as_mut().and_then(|a| DeckEngine::borrowed(&mut a.session).table_choices().ok()).unwrap_or_default();
+        let active_dims = alfadoc_model::dims::canonical(&self.package.maix.active_dims).replace('|', ", ");
         let data_sheets: Vec<String> = self.package.maix.sheets.iter().map(|s| s.name.clone()).collect();
         let links: Vec<(String, String, String, SyncMode, u64, usize)> = self
             .package
@@ -686,10 +784,18 @@ impl Shell {
                         });
                     }
                     Place::Document => {
-                        ui.weak("Uses the table the caret is in.");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut side.field, false, "A table");
+                            ui.radio_value(&mut side.field, true, "Words in a sentence");
+                        });
+                        if side.field {
+                            ui.weak("Select the words in the document that should stay live, then Create link. Link them to a single cell.");
+                        } else {
+                            table_picker(ui, ("doc_table", label), &mut side.pick, &word_choices, "The table the caret is in");
+                        }
                     }
                     Place::Slides => {
-                        ui.weak("Uses the table selected on the current slide.");
+                        table_picker(ui, ("deck_table", label), &mut side.pick, &deck_choices, "The table selected on the slide");
                     }
                 }
             }
@@ -707,6 +813,22 @@ impl Shell {
             if !draft.message.is_empty() {
                 ui.label(&draft.message);
             }
+            ui.separator();
+            ui.collapsing("Variant blocks (audience, language…)", |ui| {
+                if active_dims.is_empty() {
+                    ui.weak("Choose dimensions first (Data tab ▸ Dimensions), for example audience = client.");
+                } else {
+                    ui.label(format!("Current: {}", active_dims));
+                    ui.horizontal(|ui| {
+                        if ui.button("Mark the selected words").on_hover_text("They will belong to the current dimensions").clicked() {
+                            actions.push(Action::MarkVariant);
+                        }
+                        if ui.button("Keep only these blocks").on_hover_text("Delete the variant blocks that belong to other values (Undo brings them back)").clicked() {
+                            actions.push(Action::KeepVariants);
+                        }
+                    });
+                }
+            });
             ui.separator();
             if links.is_empty() {
                 ui.weak("No links yet.");
@@ -751,6 +873,27 @@ impl Shell {
                     };
                 }
                 Action::Review(id) => self.draft.resolving = id,
+                Action::MarkVariant => {
+                    let dims = self.package.maix.active_dims.clone();
+                    self.draft.message = match self.word.as_mut() {
+                        None => "Open the Document tab first.".to_string(),
+                        Some(app) => match WordEngine::borrowed(&mut app.session).mark_variant(&dims) {
+                            Ok(()) => "Marked. The selected words now belong to these dimensions.".to_string(),
+                            Err(e) => format!("Select some words in the document first ({e})."),
+                        },
+                    };
+                }
+                Action::KeepVariants => {
+                    let dims = self.package.maix.active_dims.clone();
+                    self.draft.message = match self.word.as_mut() {
+                        None => "Open the Document tab first.".to_string(),
+                        Some(app) => match WordEngine::borrowed(&mut app.session).keep_variants(&dims) {
+                            Ok(0) => "Nothing to remove: every block belongs to these dimensions.".to_string(),
+                            Ok(n) => format!("Removed {n} block(s) for other dimensions. Undo in the Document brings them back."),
+                            Err(e) => e.to_string(),
+                        },
+                    };
+                }
                 Action::Resolve(i, row, col, keep_a) => {
                     if let Err(e) = self.resolve_clash(i, row, col, keep_a) {
                         self.draft.message = e;
@@ -769,7 +912,7 @@ impl Shell {
                 Action::Delete(i) => {
                     if i < self.package.links.len() {
                         let gone = self.package.links.remove(i);
-                        self.watch.conflicts.remove(&gone.id);
+                        self.watch.forget(&gone.id);
                     }
                 }
             }
@@ -777,8 +920,19 @@ impl Shell {
     }
 }
 
+/// A list of the tables of a document or deck; 0 means the one that is selected.
+fn table_picker(ui: &mut egui::Ui, id: (&str, &str), pick: &mut usize, choices: &[TableChoice], selected_text: &str) {
+    let current = if *pick == 0 { selected_text.to_string() } else { choices.iter().find(|c| c.nth == *pick).map_or_else(|| format!("Table {pick}"), TableChoice::label) };
+    egui::ComboBox::from_id_salt(id).selected_text(current).width(320.0).show_ui(ui, |ui| {
+        ui.selectable_value(pick, 0, selected_text);
+        for c in choices {
+            ui.selectable_value(pick, c.nth, c.label());
+        }
+    });
+}
+
 /// What one end of a link points at, in words: `Data: Costs!A1:C10`, `Sheet range`, `report.docx`.
-fn describe(e: &Endpoint, maix: &alfadoc_model::Maix) -> String {
+pub(crate) fn describe(e: &Endpoint, maix: &alfadoc_model::Maix) -> String {
     match (&e.target, &e.anchor) {
         (Target::External { path, .. }, _) => std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned()),
         (_, Anchor::Maix { sheet, top, left, bottom, right, .. }) => {
@@ -786,19 +940,19 @@ fn describe(e: &Endpoint, maix: &alfadoc_model::Maix) -> String {
             format!("Data: {name}!{}", range_text((*top, *left, *bottom, *right)))
         }
         (_, Anchor::GridName { .. }) => "Sheet range".to_string(),
-        (_, Anchor::WordControl { .. }) => "Document table".to_string(),
+        (_, Anchor::WordControl { .. }) => "Document table or field".to_string(),
         (_, Anchor::DeckShape { .. }) => "Slide table".to_string(),
     }
 }
 
 /// `(0, 0, 9, 2)` as `A1:C10`.
-fn range_text(r: (u32, u16, u32, u16)) -> String {
+pub(crate) fn range_text(r: (u32, u16, u32, u16)) -> String {
     let corner = |row: u32, col: u16| format!("{}{}", column_name(col), row + 1);
     if (r.0, r.1) == (r.2, r.3) { corner(r.0, r.1) } else { format!("{}:{}", corner(r.0, r.1), corner(r.2, r.3)) }
 }
 
 /// `HH:MM:SS` (UTC) of a millisecond timestamp.
-fn clock(ms: u64) -> String {
+pub(crate) fn clock(ms: u64) -> String {
     let secs = ms / 1000;
     format!("{:02}:{:02}:{:02} UTC", (secs / 3600) % 24, (secs / 60) % 60, secs % 60)
 }

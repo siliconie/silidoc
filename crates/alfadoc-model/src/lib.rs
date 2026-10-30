@@ -10,6 +10,7 @@ pub mod error;
 pub mod formula;
 pub mod links;
 pub mod maix;
+pub mod security;
 pub mod variant;
 
 pub use container::{Alfadoc, Manifest};

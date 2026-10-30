@@ -20,7 +20,7 @@ Ordered by dependency. Each milestone ends with something that runs and is teste
 ## M2 — Live links inside one file
 - Create a link from a selection (`alfadoc.link.create`): maix range ↔ Word table ↔ slide table, all directions.
 - ✅ Dispatcher-driven debounced sync; per-cell conflict dialog (Links ▸ Resolve…, keep A or B for each cell or for all); linked Data ranges tinted in the Data tab; Data ends can be picked from the sheet list or from the Data tab selection; one sync pass is one undo step in the document and on slides (the sheet already did this); dates written to the sheet get a date format and read back as dates.
-- Still open: inline fields (single-cell links in a sentence) need content-control support in WordCraft; choosing a Document or Slides table from a list.
+- ✅ Inline fields: a Document end can be "Words in a sentence" (the selected words become a plain-text content control tagged with the link; it is a one-cell region). Document and Slides tables are chosen from a list of every table, not only the selected one.
 
 ## M3 — External files
 - Import `.xlsx`, `.docx`, `.pptx` as linked sources; file watcher + echo guard.
@@ -30,8 +30,10 @@ Ordered by dependency. Each milestone ends with something that runs and is teste
 ## M4 — Convert and extend maix
 - Export to `.docx`/`.xlsx`/`.pptx` with live content flattened to values; link tags preserved.
 - ✅ In the Data tab: formulas (`=B2*2`, `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `ABS`, `ROUND`), the `@{…}` suffix, `DIMSUM`, `DIMAVG`, `DIMCOUNT`, `DIMSLICE`, and a Dimensions menu that chooses which vector the grid shows and writes (`alfadoc-model::formula`).
-- ✅ The variant-block rule (`alfadoc-model::variant`): tag format, parsing and the show/hide test. Not yet wired to the editors: hiding content in a Word control or a slide shape needs editor support, and flatten-for-audience export follows with the converters.
-- Not started: `DIMSUM` and friends inside the *sheet's* own formulas (GridCraft has no function hook, and the engines stay untouched); the paged maix profile; namespace encryption and signature.
+- ✅ Links tab (Alt+5): list with status and filter, details of both ends, live cell-by-cell comparison, rename, direction, pause, sync once, make one end equal the other, swap, remove, conflicts and a session activity list. Link records gained `name`, `paused`, `created` (optional in the file).
+- ✅ Variant blocks in the document: Links ▸ Variant blocks marks the selected words with the current dimensions (a rich-text content control tagged `alfadoc:variant=…`) and "Keep only these blocks" deletes the blocks for other values (one Undo restores them). The editors cannot *hide* content, so this is a flatten, not a live view. Slides do not have it yet.
+- ✅ Passphrase protection: Protect ▸ encrypt this document (every Save and recovery copy is encrypted), unlock on Open, sign a copy, check a signature (`alfadoc-model::security`, `protect.rs`).
+- Not started: `DIMSUM` and friends inside the *sheet's* own formulas (GridCraft has no function hook, and the engines stay untouched); the paged maix profile.
 
 ## Not planned
 - A mobile app. Whole-body two-way sync of free text between `.docx`/`.pptx` and Alfadoc.

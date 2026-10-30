@@ -104,7 +104,7 @@ mod tests {
 
     fn link(mode: SyncMode) -> Link {
         let ep = |n: &str| Endpoint { target: Target::Internal { part: n.into() }, anchor: Anchor::GridName { name: n.into() } };
-        Link { id: "L".into(), a: ep("a"), b: ep("b"), mode, base: None }
+        Link { id: "L".into(), a: ep("a"), b: ep("b"), mode, base: None, name: String::new(), paused: false, created: 0 }
     }
 
     fn mem(p: &[((u32, u16), i64)]) -> Mem {

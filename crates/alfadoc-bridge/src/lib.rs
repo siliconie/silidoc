@@ -13,6 +13,6 @@ pub mod maix_access;
 pub mod textcell;
 
 pub use dispatch::{Change, Dispatcher};
-pub use engine::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess};
+pub use engine::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess, TableChoice, preview_of};
 pub use link_sync::{Outcome, resolve_cell, sync_link};
 pub use maix_access::MaixAccess;

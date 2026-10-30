@@ -16,6 +16,12 @@ pub enum Error {
     UnknownSheet(u16),
     #[error("dimension vector table is full for one canonical vector (256 collisions)")]
     DimCollisionOverflow,
+    #[error("this file is protected with a passphrase")]
+    Encrypted,
+    #[error("wrong passphrase, or the file was changed")]
+    WrongPassphrase,
+    #[error("security: {0}")]
+    Security(String),
     #[error("zip error: {0}")]
     Zip(String),
     #[error("json error: {0}")]

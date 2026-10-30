@@ -83,6 +83,22 @@ pub struct Link {
     pub mode: SyncMode,
     #[serde(default)]
     pub base: Option<Snapshot>,
+    /// A label the user gave the link (empty: shown by its ends).
+    #[serde(default)]
+    pub name: String,
+    /// A paused link is left alone by automatic syncing (a manual "Sync once" still works).
+    #[serde(default)]
+    pub paused: bool,
+    /// When the link was made, in milliseconds since 1970 (0 for links made before this was kept).
+    #[serde(default)]
+    pub created: u64,
+}
+
+impl Link {
+    /// A new link that has never been synced.
+    pub fn new(id: impl Into<String>, a: Endpoint, b: Endpoint, mode: SyncMode, created: u64) -> Link {
+        Link { id: id.into(), a, b, mode, base: None, name: String::new(), paused: false, created }
+    }
 }
 
 const TAG_PREFIX: &str = "alfadoc:link=";
@@ -118,6 +134,14 @@ mod tests {
     }
 
     #[test]
+    fn links_saved_before_names_and_pausing_still_open() {
+        let old = r#"{"id":"L1","a":{"target":{"where":"internal","part":"data/maix"},"anchor":{"kind":"grid_name","name":"n"}},"b":{"target":{"where":"internal","part":"sheets/main.xlsx"},"anchor":{"kind":"grid_name","name":"m"}},"mode":"mirror"}"#;
+        let l: Link = serde_json::from_str(old).unwrap();
+        assert_eq!((l.name.as_str(), l.paused, l.created), ("", false, 0));
+        assert!(l.base.is_none());
+    }
+
+    #[test]
     fn link_json_round_trip() {
         let l = Link {
             id: "L1".into(),
@@ -125,6 +149,9 @@ mod tests {
             b: Endpoint { target: Target::External { path: "budget.xlsx".into(), sha256: "ab".into() }, anchor: Anchor::GridName { name: "Costs".into() } },
             mode: SyncMode::Mirror,
             base: None,
+            name: "Costs".into(),
+            paused: true,
+            created: 7,
         };
         let back: Link = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(l, back);

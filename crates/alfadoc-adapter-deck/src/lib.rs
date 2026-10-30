@@ -13,7 +13,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::borrow::BorrowMut;
-use alfadoc_bridge::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess, textcell};
+use alfadoc_bridge::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess, TableChoice, preview_of, textcell};
 use alfadoc_model::Anchor;
 use deckcraft_engine::model::{Shape, ShapeId, ShapeKind, SlideId};
 use deckcraft_engine::{EngineError, Session, find_command};
@@ -102,6 +102,28 @@ impl<S: BorrowMut<Session>> DeckEngine<S> {
         let result = self.run("shape.rename", &json!({ "id": shape, "name": name })).map(|_| ());
         self.go(back)?;
         result
+    }
+
+    /// Every table of the presentation (named or not), slide by slide, for a picker.
+    pub fn table_choices(&self) -> Result<Vec<TableChoice>, BridgeError> {
+        fn walk(shapes: &[Shape], slide_index: usize, depth: usize, out: &mut Vec<TableChoice>) {
+            if depth > MAX_GROUP_DEPTH {
+                return;
+            }
+            for s in shapes {
+                if let ShapeKind::Table(t) = &s.kind {
+                    let first: Vec<String> = t.rows.first().map(|r| r.cells.iter().map(|c| c.text.text()).collect()).unwrap_or_default();
+                    out.push(TableChoice { nth: out.len() + 1, rows: t.n_rows(), cols: t.n_cols(), preview: preview_of(first.into_iter()), place: format!("Slide {}", slide_index + 1) });
+                }
+                walk(s.children(), slide_index, depth + 1, out);
+            }
+        }
+        let doc = self.s().doc().map_err(map_err)?;
+        let mut out = vec![];
+        for (i, slide) in doc.doc.slides.iter().enumerate() {
+            walk(&slide.shapes, i, 0, &mut out);
+        }
+        Ok(out)
     }
 
     /// How many tables the presentation holds, named or not.
@@ -354,6 +376,15 @@ mod tests {
         assert_eq!(r.cells.len(), 4);
     }
 
+
+    #[test]
+    fn every_table_can_be_offered_in_a_picker() {
+        let (d, _) = deck_with_table();
+        let choices = d.table_choices().unwrap();
+        assert_eq!(choices.len(), 1);
+        assert_eq!((choices[0].nth, choices[0].rows, choices[0].cols), (1, 3, 2));
+        assert!(choices[0].label().starts_with("Slide 1 · Table 1 · 3×2"));
+    }
 
     #[test]
     fn a_sync_pass_is_one_undo_step() {

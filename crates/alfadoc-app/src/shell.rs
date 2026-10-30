@@ -9,8 +9,10 @@
 use crate::ctxstate::ContextState;
 use crate::hosts;
 use crate::data_view::DataView;
+use crate::links_view::LinksTab;
 use crate::linking::{LinkDraft, Watch};
 use crate::package;
+use crate::protect::{Protect, Unlock};
 use crate::recovery::{self, Recovery};
 use alfadoc_model::Alfadoc;
 use std::path::PathBuf;
@@ -48,10 +50,12 @@ pub enum Tab {
     Slides,
     /// The package's shared data store (maix) as a grid.
     Data,
+    /// The list of links with their details and controls.
+    Links,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Sheet, Tab::Document, Tab::Slides, Tab::Data];
+    pub const ALL: [Tab; 5] = [Tab::Sheet, Tab::Document, Tab::Slides, Tab::Data, Tab::Links];
 
     pub(crate) fn index(self) -> usize {
         match self {
@@ -59,6 +63,7 @@ impl Tab {
             Tab::Document => 1,
             Tab::Slides => 2,
             Tab::Data => 3,
+            Tab::Links => 4,
         }
     }
 
@@ -68,6 +73,7 @@ impl Tab {
             Tab::Document => "Document",
             Tab::Slides => "Slides",
             Tab::Data => "Data",
+            Tab::Links => "Links",
         }
     }
 
@@ -77,6 +83,7 @@ impl Tab {
             Tab::Document => "Document (WordCraft)  Alt+2",
             Tab::Slides => "Presentation (DeckCraft)  Alt+3",
             Tab::Data => "Shared data store (maix)  Alt+4",
+            Tab::Links => "All links: status, details and controls  Alt+5",
         }
     }
 
@@ -86,6 +93,7 @@ impl Tab {
             Tab::Document => egui::Key::Num2,
             Tab::Slides => egui::Key::Num3,
             Tab::Data => egui::Key::Num4,
+            Tab::Links => egui::Key::Num5,
         }
     }
 
@@ -111,6 +119,7 @@ impl Tab {
                     Some("doc" | "document" | "word") => Tab::Document,
                     Some("slides" | "deck" | "slide") => Tab::Slides,
                     Some("data" | "maix") => Tab::Data,
+                    Some("links" | "link") => Tab::Links,
                     _ => Tab::Sheet,
                 };
             }
@@ -122,17 +131,17 @@ impl Tab {
 pub struct Shell {
     pub(crate) active: Tab,
     /// A tab change asked for during `ui`, applied at the start of the next `logic` pass.
-    pending: Option<Tab>,
+    pub(crate) pending: Option<Tab>,
     pub(crate) grid: Option<SheetApp>,
     pub(crate) word: Option<WordApp>,
     pub(crate) deck: Option<SlideApp>,
     /// The look each engine left on the context when its tab was last active.
-    saved: [Option<ContextState>; 4],
+    saved: [Option<ContextState>; 5],
     /// Frames drawn so far: fonts exist on the context only after the first one.
     frames: u64,
     /// The `.alfadoc` package this window is editing (links, maix and untouched parts live here).
     pub(crate) package: Alfadoc,
-    file: Option<PathBuf>,
+    pub(crate) file: Option<PathBuf>,
     want: Option<FileAction>,
     /// A short message in the tab bar and the time (egui clock) it disappears.
     toast: Option<(String, f64)>,
@@ -147,7 +156,12 @@ pub struct Shell {
     pub(crate) externals: std::collections::HashMap<String, crate::external::ExternalFile>,
     pub(crate) data: DataView,
     /// Keeps a copy of unsaved work so a crash loses nothing (`recovery.rs`).
-    recovery: Recovery,
+    pub(crate) recovery: Recovery,
+    /// The key of a passphrase-protected document: Save and recovery copies are encrypted with it.
+    pub(crate) key: Option<alfadoc_model::security::Protector>,
+    /// A protected file that is waiting for its passphrase.
+    pub(crate) unlock: Option<Unlock>,
+    pub(crate) protect: Protect,
     /// Copies left by a window that did not close normally, offered at start-up.
     recover_prompt: Vec<recovery::Found>,
     recover_checked: bool,
@@ -160,11 +174,12 @@ pub struct Shell {
     _print_guard: crate::platform::print::ExitGuard,
     pub(crate) draft: LinkDraft,
     pub(crate) watch: Watch,
+    pub(crate) links_view: LinksTab,
 }
 
 impl Shell {
     pub fn new(start: Tab, startup: Option<PathBuf>) -> Shell {
-        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), recover_prompt: vec![], recover_checked: false, calc_seen: 0, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default() }
+        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), key: None, unlock: None, protect: Protect::default(), recover_prompt: vec![], recover_checked: false, calc_seen: 0, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default(), links_view: LinksTab::default() }
     }
 
     fn ensure(&mut self, ctx: &egui::Context, tab: Tab) {
@@ -207,7 +222,7 @@ impl Shell {
         }
     }
 
-    fn set_title(&self, ctx: &egui::Context) {
+    pub(crate) fn set_title(&self, ctx: &egui::Context) {
         let name = self.file.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} - Alfadoc")));
     }
@@ -322,7 +337,7 @@ impl Shell {
     }
 
     /// Collects what the opened editors hold into the package and returns the `.alfadoc` bytes.
-    fn package_bytes(&mut self, file_name: &str) -> Result<Vec<u8>, String> {
+    pub(crate) fn package_bytes(&mut self, file_name: &str) -> Result<Vec<u8>, String> {
         if let Some(app) = self.grid.as_mut() {
             let docs = package::save_all_sheets(app)?;
             package::put_parts(&mut self.package.parts, package::SHEET_DIR, "xlsx", docs);
@@ -340,7 +355,11 @@ impl Shell {
         if !stem.is_empty() {
             self.package.manifest.title = stem.to_string();
         }
-        self.package.to_bytes().map_err(|e| e.to_string())
+        let bytes = self.package.to_bytes().map_err(|e| e.to_string())?;
+        match &self.key {
+            Some(key) => key.seal(&bytes).map_err(|e| e.to_string()),
+            None => Ok(bytes),
+        }
     }
 
     /// Brings a spreadsheet, document or presentation file into the editor that reads it.
@@ -363,7 +382,7 @@ impl Shell {
             Tab::Sheet => self.grid.as_mut().map_or(Ok(()), |app| package::load_sheet(app, name, bytes))?,
             Tab::Document => self.word.as_mut().map_or(Ok(()), |app| package::load_document(app, name, bytes))?,
             Tab::Slides => self.deck.as_mut().map_or(Ok(()), |app| package::load_deck(app, name, bytes))?,
-            Tab::Data => {}
+            Tab::Data | Tab::Links => {}
         }
         Ok(Some(format!("Imported {name}")))
     }
@@ -374,13 +393,13 @@ impl Shell {
             Tab::Sheet => "xlsx",
             Tab::Document => "docx",
             Tab::Slides => "pptx",
-            Tab::Data => return Err("Export applies to the Sheet, Document and Slides tabs.".into()),
+            Tab::Data | Tab::Links => return Err("Export applies to the Sheet, Document and Slides tabs.".into()),
         };
         let bytes = match self.active {
             Tab::Sheet => self.grid.as_mut().map(package::save_sheet),
             Tab::Document => self.word.as_ref().map(package::save_document),
             Tab::Slides => self.deck.as_mut().map(package::save_deck),
-            Tab::Data => None,
+            Tab::Data | Tab::Links => None,
         }
         .ok_or("Nothing to export in this editor yet.")??;
         Ok((bytes, ext))
@@ -393,7 +412,7 @@ impl Shell {
             Tab::Sheet => ("Excel workbook", "xlsx"),
             Tab::Document => ("Word document", "docx"),
             Tab::Slides => ("PowerPoint presentation", "pptx"),
-            Tab::Data => return Err("Export applies to the Sheet, Document and Slides tabs.".into()),
+            Tab::Data | Tab::Links => return Err("Export applies to the Sheet, Document and Slides tabs.".into()),
         };
         let stem = self.file.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |s| s.to_string_lossy().into_owned());
         let Some(mut path) = rfd::FileDialog::new().add_filter(label, &[ext]).set_file_name(format!("{stem}.{ext}")).save_file() else {
@@ -419,14 +438,19 @@ impl Shell {
         };
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if alfadoc_model::security::is_encrypted(&bytes) {
+            self.unlock = Some(Unlock { name, path: Some(path), bytes, pass: String::new(), error: None, recovered: None });
+            return Ok(None);
+        }
         let message = self.load_package(ctx, &name, &bytes)?;
         self.file = Some(path);
         Ok(message)
     }
 
     /// Replaces the open package with the one in `bytes`.
-    fn load_package(&mut self, ctx: &egui::Context, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+    pub(crate) fn load_package(&mut self, ctx: &egui::Context, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         let package = Alfadoc::from_bytes(bytes).map_err(|e| e.to_string())?;
+        self.key = None;
         let mut first: Option<Tab> = None;
         for (tab, dir) in [(Tab::Sheet, package::SHEET_DIR), (Tab::Document, package::DOC_DIR), (Tab::Slides, package::DECK_DIR)] {
             let found = package::parts_for(&package.parts, dir);
@@ -452,7 +476,7 @@ impl Shell {
                             package::load_deck(app, file_name, data)?;
                         }
                     }
-                    Tab::Data => {}
+                    Tab::Data | Tab::Links => {}
                 }
             }
             first.get_or_insert(tab);
@@ -461,6 +485,8 @@ impl Shell {
             self.switch(ctx, tab);
         }
         self.package = package;
+        self.watch.reset_links();
+        self.links_view = LinksTab::default();
         self.externals.clear();
         self.watch.request_sync(package::now_ms());
         self.recovery.saved();
@@ -582,7 +608,15 @@ impl Shell {
             self.recover_prompt.remove(i).discard();
         } else if let Some(i) = recover {
             let found = self.recover_prompt.remove(i);
-            let result = found.read().map_err(|e| e.to_string()).and_then(|bytes| self.load_package(ctx, &found.title, &bytes));
+            let bytes = found.read().map_err(|e| e.to_string());
+            if let Ok(b) = &bytes
+                && alfadoc_model::security::is_encrypted(b)
+            {
+                let path = found.original.as_ref().map(PathBuf::from);
+                self.unlock = Some(Unlock { name: found.title.clone(), path, bytes: b.clone(), pass: String::new(), error: None, recovered: Some(found) });
+                return;
+            }
+            let result = bytes.and_then(|bytes| self.load_package(ctx, &found.title, &bytes));
             match result {
                 Ok(_) => {
                     self.file = found.original.as_ref().map(PathBuf::from);
@@ -618,8 +652,11 @@ impl Shell {
                     }
                 }
                 ui.separator();
-                if ui.button("Links").on_hover_text("Link tables and ranges between the editors").clicked() {
+                if ui.button("Link…").on_hover_text("Make a new link between tables and ranges in the editors (all links are in the Links tab)").clicked() {
                     self.draft.open = !self.draft.open;
+                }
+                if ui.button(if self.key.is_some() { "Protect 🔒" } else { "Protect" }).on_hover_text("Encrypt this document with a passphrase, or sign a copy").clicked() {
+                    self.protect.open = !self.protect.open;
                 }
                 if ui.button("Open").on_hover_text("Open an .alfadoc file").clicked() {
                     self.want = Some(FileAction::Open);
@@ -685,7 +722,7 @@ impl eframe::App for Shell {
                     app.logic(ctx);
                 }
             }
-            Tab::Data => {}
+            Tab::Data | Tab::Links => {}
         }
     }
 
@@ -706,7 +743,7 @@ impl eframe::App for Shell {
                     app.raw_input_hook(ctx, raw);
                 }
             }
-            Tab::Data => {}
+            Tab::Data | Tab::Links => {}
         }
     }
 
@@ -719,7 +756,7 @@ impl eframe::App for Shell {
         }
         // The Data tab has no engine behind it to paint its background, so it fills its own with the
         // current theme's colour (a frameless panel would show the window's black clear colour).
-        let frame = if self.active == Tab::Data { egui::Frame::new().fill(ui.visuals().panel_fill) } else { egui::Frame::NONE };
+        let frame = if matches!(self.active, Tab::Data | Tab::Links) { egui::Frame::new().fill(ui.visuals().panel_fill) } else { egui::Frame::NONE };
         egui::CentralPanel::default().frame(frame).show(ui, |ui| match self.active {
             Tab::Sheet => {
                 if let Some(app) = self.grid.as_mut() {
@@ -740,9 +777,12 @@ impl eframe::App for Shell {
                 self.data.linked = self.linked_data_ranges();
                 self.data.show(ui, &mut self.package.maix, package::now_ms());
             }
+            Tab::Links => self.links_tab(ui),
         });
         self.link_window(ui.ctx());
         self.conflict_window(ui.ctx());
+        self.protect_window(ui.ctx());
+        self.unlock_window(ui.ctx());
         self.recovery_window(ui.ctx());
         self.frames = self.frames.saturating_add(1);
     }

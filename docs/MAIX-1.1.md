@@ -67,7 +67,7 @@ view switches by choosing the vector. The same tag works on slide shapes. Becaus
 Word/PowerPoint tag, an exported file keeps all variants; a "flatten for this audience" export
 removes the others.
 
-**Status (v1).** The Data tab evaluates `DIMSUM`, `DIMAVG`, `DIMCOUNT`, `DIMSLICE` and the `@{…}` suffix in its own formulas (see `crates/alfadoc-model/src/formula.rs` for the exact grammar and error codes). Cells read each other's stored values and a recalculation repeats until nothing changes, so a circular reference stops after eight passes instead of being reported. The variant-block *rule* is implemented (`variant.rs`); showing and hiding content is up to the editor and is not wired yet.
+**Status (v1).** The Data tab evaluates `DIMSUM`, `DIMAVG`, `DIMCOUNT`, `DIMSLICE` and the `@{…}` suffix in its own formulas (see `crates/alfadoc-model/src/formula.rs` for the exact grammar and error codes). Cells read each other's stored values and a recalculation repeats until nothing changes, so a circular reference stops after eight passes instead of being reported. The variant-block rule is implemented (`variant.rs`) and used for documents (Links ▸ Variant blocks): mark the selected words, then keep only the blocks for the current dimensions. A live show/hide view and slide shapes are not done.
 
 **Formulas stay Excel-compatible.** The dimension suffix and `DIMSUM`, `DIMAVG`, `DIMSLICE` are
 *additions* to GridCraft's existing formula language, never a replacement, so formulas imported

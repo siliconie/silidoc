@@ -14,10 +14,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::borrow::BorrowMut;
-use alfadoc_bridge::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess, textcell};
-use alfadoc_model::Anchor;
+use alfadoc_bridge::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess, TableChoice, preview_of, textcell};
+use alfadoc_model::variant::{variant_tag, visible};
+use alfadoc_model::{Anchor, DimVector};
 use serde_json::{Value as Json, json};
-use wordcraft_engine::doc::{Block, Blocks, Path, Pos, StoryRef, Table};
+use wordcraft_engine::doc::{Block, Blocks, ControlRange, Path, Pos, StoryRef, Table};
 use wordcraft_engine::{CmdError, Selection, Session};
 
 /// The most cells one link may cover.
@@ -88,6 +89,88 @@ impl<S: BorrowMut<Session>> WordEngine<S> {
     /// Tags the table the caret is in, so a link can find it. Replaces any earlier tag.
     pub fn tag_selected_table(&mut self, tag: &str) -> Result<(), BridgeError> {
         self.run("table.altText", &json!({ "text": tag })).map(|_| ())
+    }
+
+    /// Every table of the body (tagged or not), for a picker.
+    pub fn table_choices(&self) -> Vec<TableChoice> {
+        self.all_table_paths()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, path)| {
+                let table = self.table(path).ok()?;
+                let (rows, cols) = dimensions(table);
+                let first = table.rows.first().map(|r| r.cells.iter().map(|c| cell_text(&c.blocks)).collect::<Vec<_>>()).unwrap_or_default();
+                Some(TableChoice { nth: i + 1, rows, cols, preview: preview_of(first.into_iter()), place: String::new() })
+            })
+            .collect()
+    }
+
+    /// Wraps the selected text in a plain-text content control tagged `tag`: an **inline field**
+    /// a link can keep in step with one cell. With nothing selected the field starts empty.
+    pub fn insert_field(&mut self, tag: &str) -> Result<(), BridgeError> {
+        self.run("developer.plainText", &json!({ "tag": tag, "title": "Alfadoc link" })).map(|_| ())
+    }
+
+    /// Wraps the selected text in a **variant block**: it belongs to the audience or language
+    /// named by `variant` (`alfadoc:variant={"audience":"client"}`).
+    pub fn mark_variant(&mut self, variant: &DimVector) -> Result<(), BridgeError> {
+        self.run("developer.richText", &json!({ "tag": variant_tag(variant), "title": "Variant" })).map(|_| ())
+    }
+
+    /// Deletes every variant block that does not belong to `active` (text and all) and returns
+    /// how many went. One undo brings them all back.
+    pub fn keep_variants(&mut self, active: &DimVector) -> Result<usize, BridgeError> {
+        let mut doomed: Vec<ControlRange> = self.s().doc.control_ranges(StoryRef::Body).into_iter().filter(|r| !visible(Some(r.control.tag.as_str()), active)).collect();
+        // Last in the document first, so the positions of the others stay right.
+        doomed.sort_by(|a, b| (&b.start.path, b.start.off).cmp(&(&a.start.path, a.start.off)));
+        let saved = self.s().sel.clone();
+        let mut result = Ok(());
+        for (i, r) in doomed.iter().enumerate() {
+            let after_end = Pos { off: r.end.off + '\u{FFFC}'.len_utf8(), ..r.end.clone() };
+            self.sm().sel = Selection { anchor: r.start.clone(), focus: after_end };
+            if i > 0 {
+                self.sm().join_next_undo();
+            }
+            if let Err(e) = self.run("text.delete", &json!({})) {
+                result = Err(e);
+                break;
+            }
+        }
+        self.sm().sel = saved;
+        result.map(|()| doomed.len())
+    }
+
+    /// The inline field tagged `tag`, if the body has one.
+    fn field_range(&self, tag: &str) -> Option<ControlRange> {
+        self.s().doc.control_ranges(StoryRef::Body).into_iter().find(|r| r.control.tag == tag)
+    }
+
+    /// The field behind `anchor`, when the tag names a field and no table.
+    fn field_for(&self, anchor: &Anchor) -> Option<ControlRange> {
+        let Anchor::WordControl { tag } = anchor else {
+            return None;
+        };
+        if self.find(tag).is_some() { None } else { self.field_range(tag) }
+    }
+
+    /// Replaces a field's text. Only cell (0, 0) exists.
+    fn write_field(&mut self, range: &ControlRange, changes: &[CellChange]) -> Result<(), BridgeError> {
+        if let Some(bad) = changes.iter().find(|c| c.row != 0 || c.col != 0) {
+            return Err(BridgeError::BadParams(format!("change at row {}, column {} is outside the linked field", bad.row, bad.col)));
+        }
+        let Some(change) = changes.last() else {
+            return Ok(());
+        };
+        let new_text = change.value.as_ref().map(textcell::to_text).unwrap_or_default();
+        let old_text = if range.control.showing_placeholder { String::new() } else { self.s().doc.control_text(range) };
+        if old_text == new_text {
+            return Ok(());
+        }
+        let saved = self.s().sel.clone();
+        self.sm().sel = Selection { anchor: range.content_start(), focus: range.end.clone() };
+        let result = if new_text.is_empty() { self.run("text.delete", &json!({})) } else { self.run("text.insert", &json!({ "text": new_text })) };
+        self.sm().sel = saved;
+        result.map(|_| ())
     }
 
     /// How many tables the document body holds, tagged or not (nested ones included).
@@ -266,6 +349,14 @@ impl<S: BorrowMut<Session>> Engine for WordEngine<S> {
 
 impl<S: BorrowMut<Session>> RegionAccess for WordEngine<S> {
     fn read_region(&self, anchor: &Anchor) -> Result<Region, BridgeError> {
+        if let Some(range) = self.field_for(anchor) {
+            let mut region = Region::default();
+            let text = if range.control.showing_placeholder { String::new() } else { self.s().doc.control_text(&range) };
+            if !text.is_empty() {
+                region.cells.insert((0, 0), textcell::from_text(&text));
+            }
+            return Ok(region);
+        }
         let found = self.resolve(anchor)?;
         let table = self.table(&found.path)?;
         let mut region = Region::default();
@@ -284,6 +375,9 @@ impl<S: BorrowMut<Session>> RegionAccess for WordEngine<S> {
     }
 
     fn write_changes(&mut self, anchor: &Anchor, changes: &[CellChange]) -> Result<(), BridgeError> {
+        if let Some(range) = self.field_for(anchor) {
+            return self.write_field(&range, changes);
+        }
         let found = self.resolve(anchor)?;
         // Check everything first, so a bad change leaves the table untouched.
         {
@@ -416,6 +510,54 @@ mod tests {
         assert_eq!(w.read_region(&a).unwrap().cells.len(), 3);
         w.execute("edit.undo", &json!({})).unwrap();
         assert!(w.read_region(&a).unwrap().cells.is_empty(), "one undo takes back the whole pass");
+    }
+
+    #[test]
+    fn a_selected_word_becomes_a_live_inline_field() {
+        let mut w = WordEngine::new();
+        w.execute("text.insert", &json!({ "text": "Total: 12 EUR" })).unwrap();
+        let para = Path(vec![0]);
+        w.session_mut().sel = Selection { anchor: Pos::new(StoryRef::Body, para.clone(), 7), focus: Pos::new(StoryRef::Body, para, 9) };
+        w.insert_field("alfadoc:link=F1").unwrap();
+        let a = anchor("alfadoc:link=F1");
+        assert_eq!(w.read_region(&a).unwrap().cells.get(&(0, 0)), Some(&Value::Int(12)));
+        w.write_changes(&a, &[CellChange { row: 0, col: 0, value: Some(Value::Int(15)) }]).unwrap();
+        assert_eq!(w.read_region(&a).unwrap().cells.get(&(0, 0)), Some(&Value::Int(15)));
+        let text = w.session().doc.plain_text(StoryRef::Body);
+        assert!(text.contains("Total: ") && text.contains("15") && text.contains(" EUR"), "{text}");
+        assert!(!text.contains("12"), "{text}");
+        w.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(w.read_region(&a).unwrap().cells.get(&(0, 0)), Some(&Value::Int(12)));
+        assert!(w.write_changes(&a, &[CellChange { row: 1, col: 0, value: None }]).is_err());
+    }
+
+    #[test]
+    fn variant_blocks_not_for_this_audience_can_be_removed() {
+        let mut w = WordEngine::new();
+        w.execute("text.insert", &json!({ "text": "Keep. Drop. End." })).unwrap();
+        let para = Path(vec![0]);
+        w.session_mut().sel = Selection { anchor: Pos::new(StoryRef::Body, para.clone(), 6), focus: Pos::new(StoryRef::Body, para, 12) };
+        let internal: DimVector = [("audience".to_string(), "internal".to_string())].into_iter().collect();
+        let client: DimVector = [("audience".to_string(), "client".to_string())].into_iter().collect();
+        w.mark_variant(&internal).unwrap();
+        // Shown for its own audience: nothing is removed.
+        assert_eq!(w.keep_variants(&internal).unwrap(), 0);
+        assert!(w.session().doc.plain_text(StoryRef::Body).contains("Drop"));
+        // For another audience the block goes, text and all; the rest stays.
+        assert_eq!(w.keep_variants(&client).unwrap(), 1);
+        let text = w.session().doc.plain_text(StoryRef::Body);
+        assert!(!text.contains("Drop") && text.contains("Keep.") && text.contains("End."), "{text}");
+        w.execute("edit.undo", &json!({})).unwrap();
+        assert!(w.session().doc.plain_text(StoryRef::Body).contains("Drop"));
+    }
+
+    #[test]
+    fn every_table_can_be_offered_in_a_picker() {
+        let (w, _) = doc_with_table();
+        let choices = w.table_choices();
+        assert_eq!(choices.len(), 1);
+        assert_eq!((choices[0].nth, choices[0].rows, choices[0].cols), (1, 3, 2));
+        assert!(choices[0].label().starts_with("Table 1 · 3×2"));
     }
 
     #[test]

@@ -127,6 +127,36 @@ impl Alfadoc {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let entries = read_entries(bytes)?;
+        if entries.contains_key(crate::security::ENCRYPTION_ENTRY) {
+            return Err(Error::Encrypted);
+        }
+        Self::from_entries(entries)
+    }
+
+    fn from_entries(entries: BTreeMap<String, Vec<u8>>) -> Result<Self> {
+        match entries.get("mimetype") {
+            Some(m) if m.as_slice() == MIMETYPE.as_bytes() => {}
+            Some(_) => return Err(Error::NotAlfadoc("wrong mimetype".into())),
+            None => return Err(Error::MissingEntry("mimetype")),
+        }
+        let manifest: Manifest = serde_json::from_slice(entries.get("manifest.json").ok_or(Error::MissingEntry("manifest.json"))?)?;
+        if manifest.format != "alfadoc" {
+            return Err(Error::NotAlfadoc(format!("format is {:?}", manifest.format)));
+        }
+        let maix: Maix = serde_json::from_slice(entries.get("data/maix.json").ok_or(Error::MissingEntry("data/maix.json"))?)?;
+        let links: Vec<Link> = match entries.get("links.json") {
+            Some(b) => serde_json::from_slice(b)?,
+            None => vec![],
+        };
+        let parts = entries.into_iter().filter(|(n, _)| !RESERVED.contains(&n.as_str()) && is_part_name(n)).collect();
+        Ok(Alfadoc { manifest, maix, links, parts })
+    }
+}
+
+/// Every file of a zip, by name, read within the package limits.
+pub(crate) fn read_entries(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
+    {
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes))?;
         if zip.len() > MAX_ENTRIES {
             return Err(Error::Limit(format!("{} entries (max {MAX_ENTRIES})", zip.len())));
@@ -152,24 +182,26 @@ impl Alfadoc {
             }
             entries.insert(name, buf);
         }
-
-        match entries.get("mimetype") {
-            Some(m) if m.as_slice() == MIMETYPE.as_bytes() => {}
-            Some(_) => return Err(Error::NotAlfadoc("wrong mimetype".into())),
-            None => return Err(Error::MissingEntry("mimetype")),
-        }
-        let manifest: Manifest = serde_json::from_slice(entries.get("manifest.json").ok_or(Error::MissingEntry("manifest.json"))?)?;
-        if manifest.format != "alfadoc" {
-            return Err(Error::NotAlfadoc(format!("format is {:?}", manifest.format)));
-        }
-        let maix: Maix = serde_json::from_slice(entries.get("data/maix.json").ok_or(Error::MissingEntry("data/maix.json"))?)?;
-        let links: Vec<Link> = match entries.get("links.json") {
-            Some(b) => serde_json::from_slice(b)?,
-            None => vec![],
-        };
-        let parts = entries.into_iter().filter(|(n, _)| !RESERVED.contains(&n.as_str()) && is_part_name(n)).collect();
-        Ok(Alfadoc { manifest, maix, links, parts })
+        Ok(entries)
     }
+}
+
+/// Writes entries as a zip: `mimetype` first and stored, everything else deflated.
+pub(crate) fn write_entries(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    zip.start_file("mimetype", stored)?;
+    zip.write_all(MIMETYPE.as_bytes())?;
+    for (name, bytes) in entries {
+        validate_entry_name(name)?;
+        if name == "mimetype" {
+            continue;
+        }
+        zip.start_file(name.as_str(), deflated)?;
+        zip.write_all(bytes)?;
+    }
+    Ok(zip.finish()?.into_inner())
 }
 
 #[cfg(test)]
@@ -192,6 +224,9 @@ mod tests {
             b: Endpoint { target: Target::Internal { part: "document/main.docx".into() }, anchor: Anchor::WordControl { tag: "alfadoc:link=L1".into() } },
             mode: SyncMode::Mirror,
             base: None,
+            name: String::new(),
+            paused: false,
+            created: 0,
         });
         d
     }

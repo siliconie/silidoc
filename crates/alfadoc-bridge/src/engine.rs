@@ -45,6 +45,43 @@ pub trait Engine {
     }
 }
 
+/// A table in an editor, as offered by the "pick a table" list. `nth` counts from 1 in document
+/// order, the same count the adapters' `tag_table` / `name_nth_table` take.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableChoice {
+    pub nth: usize,
+    pub rows: usize,
+    pub cols: usize,
+    /// The first cells of the first row, to tell tables apart.
+    pub preview: String,
+    /// Where it is: empty in a document, `Slide 3` in a presentation.
+    pub place: String,
+}
+
+impl TableChoice {
+    /// `Table 2 · 3×2 · Item · Qty` (with the place first when there is one).
+    pub fn label(&self) -> String {
+        let mut out = String::new();
+        if !self.place.is_empty() {
+            out.push_str(&self.place);
+            out.push_str(" · ");
+        }
+        out.push_str(&format!("Table {} · {}×{}", self.nth, self.rows, self.cols));
+        if !self.preview.is_empty() {
+            out.push_str(" · ");
+            out.push_str(&self.preview);
+        }
+        out
+    }
+}
+
+/// The first three non-empty cell texts joined with ` · `, cut to 40 characters.
+pub fn preview_of(cells: impl Iterator<Item = String>) -> String {
+    let parts: Vec<String> = cells.map(|c| c.trim().replace('\n', " ")).filter(|c| !c.is_empty()).take(3).collect();
+    let text = parts.join(" · ");
+    if text.chars().count() > 40 { format!("{}…", text.chars().take(39).collect::<String>()) } else { text }
+}
+
 /// The contents of a linked region as a grid of values, **relative to the anchor's top-left**.
 /// A Word table, a sheet range and a slide table all read and write as `Region`.
 #[derive(Clone, Debug, Default, PartialEq)]

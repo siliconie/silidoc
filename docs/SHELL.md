@@ -38,7 +38,7 @@ data between tabs (M2).
 
 ## Links
 
-The **Links** button opens a window to join two editors. Each end is one of:
+The **Link…** button opens a window to join two editors (the **Links** tab, Alt+5, looks after the links that exist; see below). Each end is one of:
 
 * **Sheet**: a sheet name and range (the *Use selection* button fills them from the current selection). The range becomes a workbook defined name `alfadoc_<id>`.
 * **Document**: the table the caret is in. Its Alt Text description is set to `alfadoc:link=<id>`.
@@ -51,6 +51,20 @@ Limits for now: the two ends must be in different editors; both editors must hav
 ### Data end (maix)
 
 Either end of a link can also be **Data**: a named sheet and range of the shared maix store inside the package (for example `Costs`, `A1:C10`). Link a sheet range to Data, then a slide table to the same Data range, and the sheet and the slide stay equal through it, with every change recorded in the maix history. The data store is saved with the `.alfadoc` file.
+
+### Links tab (Alt+5)
+
+A list of every link with its status (in step, conflicts, problem, paused, waiting for an editor, never synced) and a filter, and for the selected link:
+
+- a **name** you can give it, the id, when it was made and last synced;
+- both **ends**: place, part or file, and the anchor (data sheet and range, defined name, content-control tag, slide and shape), what was read from it (size, cells with content) or why it could not be read, and **Show in editor**;
+- **Direction** (both ways, A to B, B to A) and **Paused** (a paused link is skipped by automatic syncing; **Sync once** still works);
+- **Sync once**, **Refresh**, **Swap A ↔ B**, **Make B equal A** / **Make A equal B** (every differing cell is copied; asks twice) and **Remove link** (asks twice);
+- the **conflicts** with Keep A / Keep B per cell or for all;
+- a **comparison** of the two ends cell by cell with the last agreed value and what the next sync will do with the cell (A changed → goes to B, conflict, …), optionally only the differences, up to 300 rows;
+- the **activity** of this session (not saved in the file).
+
+Names, the paused switch and the creation time are saved with the link (`links.json`: `name`, `paused`, `created`; older files open with empty values). Creating links stays in the Link… window.
 
 ### Data tab (Alt+4)
 

@@ -41,5 +41,6 @@ message rather than opened wrongly. Format migrations use maix's `.mxm` mechanis
 
 ## Planned
 
-- Optional namespace encryption and signature (MAIX §13) in `security/`.
+- Done (v1): passphrase encryption of the whole package and an HMAC signature (`security/encryption.json` + `payload.enc`, `security/signature.json`; `alfadoc-model::security`). ChaCha20-Poly1305 with a PBKDF2-HMAC-SHA-256 key (300,000 rounds); the signing key is derived from a passphrase and never stored in the file (MAIX errata E8). Encryption covers the whole package, not only the maix namespace.
+- Not done: the OS keystore, key rotation, and per-sheet access rules.
 - Computed-value cache in `computed.cache`, safe to delete.

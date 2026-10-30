@@ -81,6 +81,9 @@ fn links_and_the_data_store_survive_an_alfadoc_file_and_resync_quietly() {
         b: Endpoint { target: Target::Internal { part: "data/maix".into() }, anchor: da.clone() },
         mode: SyncMode::Mirror,
         base: None,
+        name: String::new(),
+        paused: false,
+        created: 0,
     };
     sync_link(&mut link, &mut grid, &mut MaixAccess::new(&mut pkg.maix, "t", 5), Policy::PreferA, 5).unwrap();
     pkg.links.push(link);
