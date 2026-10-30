@@ -9,6 +9,7 @@
 pub mod dispatch;
 pub mod engine;
 pub mod link_sync;
+pub mod textcell;
 
 pub use dispatch::{Change, Dispatcher};
 pub use engine::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess};

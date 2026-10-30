@@ -5,6 +5,7 @@ members = [
     "crates/alfadoc-sync",
     "crates/alfadoc-bridge",
     "crates/alfadoc-adapter-grid",
+    "crates/alfadoc-adapter-deck",
     "crates/alfadoc-engines",
     "crates/alfadoc-app",
 ]
@@ -30,6 +31,7 @@ alfadoc-model = { path = "crates/alfadoc-model" }
 alfadoc-sync = { path = "crates/alfadoc-sync" }
 alfadoc-bridge = { path = "crates/alfadoc-bridge" }
 alfadoc-adapter-grid = { path = "crates/alfadoc-adapter-grid" }
+alfadoc-adapter-deck = { path = "crates/alfadoc-adapter-deck" }
 
 # The three engines are sibling checkouts (D:\artcraft\gridcraft, ...), used as path dependencies:
 # no versions, no revs. To update an engine, `git pull` in its folder (docs/UPSTREAM.md).

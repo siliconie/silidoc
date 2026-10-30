@@ -4,4 +4,5 @@
 //! to come) so it can be built and tested without the other engines' UI stacks. This crate is what
 //! the application depends on, and it proves that all three engines unify into one build.
 
+pub use alfadoc_adapter_deck as deck;
 pub use alfadoc_adapter_grid as grid;

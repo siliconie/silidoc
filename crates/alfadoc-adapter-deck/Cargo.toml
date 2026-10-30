@@ -1,0 +1,17 @@
+[package]
+name = "alfadoc-adapter-deck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "DeckCraft behind Alfadoc's Engine and RegionAccess traits: tables on slides, with contract tests for the DeckCraft surface Alfadoc uses"
+
+[lints]
+workspace = true
+
+[dependencies]
+alfadoc-bridge = { workspace = true }
+alfadoc-model = { workspace = true }
+serde_json = { workspace = true }
+deckcraft-engine = { workspace = true }
