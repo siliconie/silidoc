@@ -84,6 +84,7 @@ opt-level = 3
 lto = "thin"
 codegen-units = 16
 debug = 0
+strip = "symbols"
 
 # [patch] is honoured ONLY in the root workspace, so the engines' own patch tables do nothing here.
 # This is the union of theirs: egui + winit forks (identical in all three engines), and krilla
