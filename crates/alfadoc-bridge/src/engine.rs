@@ -37,6 +37,12 @@ pub trait Engine {
     /// adapters answer `true` for everything except known queries (a false positive only costs one
     /// no-op sync pass).
     fn is_mutating(&self, command: &str) -> bool;
+    /// A counter the engine bumps whenever the document changes, if it keeps one (GridCraft's
+    /// `DocState::revision`). When present it is the authority on "did that command change
+    /// anything", so a command that turned out to be a no-op does not trigger a sync pass.
+    fn revision(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The contents of a linked region as a grid of values, **relative to the anchor's top-left**.

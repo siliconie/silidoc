@@ -1,5 +1,7 @@
-//! The three engines as one dependency set.
+//! The three engines as one dependency set, with their adapters re-exported under one roof.
 //!
-//! In M1 this crate gains the per-engine adapters (`Engine` + `RegionAccess` implementations) and
-//! the contract tests that pin the upstream surface Alfadoc uses (docs/UPSTREAM.md). For now it
-//! only proves that GridCraft, WordCraft and DeckCraft resolve and unify into one build.
+//! Each adapter lives in its own crate (`alfadoc-adapter-grid`, and the Word and Deck adapters
+//! to come) so it can be built and tested without the other engines' UI stacks. This crate is what
+//! the application depends on, and it proves that all three engines unify into one build.
+
+pub use alfadoc_adapter_grid as grid;

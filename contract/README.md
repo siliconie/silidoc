@@ -3,7 +3,7 @@
 Per-adapter tests that pin down the upstream surface Alfadoc uses. They live in each adapter crate's
 `tests/contract.rs` (created in M1); this folder documents the pattern and holds shared fixtures.
 
-Template (GridCraft adapter), checked against the GridCraft sources we have:
+The first real one is `every_command_and_field_the_adapter_uses_still_exists` in `crates/alfadoc-adapter-grid/src/lib.rs`. Template, checked against the GridCraft sources:
 
 ```rust
 // crates/alfadoc-adapter-grid/tests/contract.rs

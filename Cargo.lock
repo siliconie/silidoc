@@ -50,6 +50,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "alfadoc-adapter-grid"
+version = "0.1.0"
+dependencies = [
+ "alfadoc-bridge",
+ "alfadoc-model",
+ "gridcraft-engine",
+ "serde_json",
+]
+
+[[package]]
 name = "alfadoc-bridge"
 version = "0.1.0"
 dependencies = [
@@ -64,6 +74,7 @@ dependencies = [
 name = "alfadoc-engines"
 version = "0.1.0"
 dependencies = [
+ "alfadoc-adapter-grid",
  "deckcraft-engine",
  "deckcraft-ui-egui",
  "gridcraft-engine",

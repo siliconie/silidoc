@@ -12,7 +12,7 @@
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ alfadoc-app            host window: tabs, drawer, toasts, file watcher  │  (M1+)
+│ alfadoc-app            host window: tabs, drawer, toasts, file watcher  │  (grid: done; deck, word: M1)
 ├────────────────────────────────────────────────────────────────────────┤
 │ alfadoc-adapter-word / -grid / -deck     implement Engine + RegionAccess │  (M1+)
 ├────────────────────────────────────────────────────────────────────────┤

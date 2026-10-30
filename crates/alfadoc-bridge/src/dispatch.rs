@@ -55,8 +55,14 @@ impl<E: Engine> Dispatcher<E> {
             let h = self.own.get_mut(id).ok_or_else(|| BridgeError::UnknownCommand(id.to_string()))?;
             return h(params);
         }
+        let before = self.engine.revision();
         let out = self.engine.execute(id, params)?;
-        if self.engine.is_mutating(id) {
+        // With a revision counter, trust it; without one, fall back to the command's own flag.
+        let changed = match (before, self.engine.revision()) {
+            (Some(a), Some(b)) => a != b,
+            _ => self.engine.is_mutating(id),
+        };
+        if changed {
             self.seq += 1;
             self.changes.push(Change { seq: self.seq, command: id.to_string() });
         }
@@ -103,6 +109,36 @@ mod tests {
         assert_eq!(ch, vec![Change { seq: 1, command: "cell.set".into() }]);
         assert!(d.drain_changes().is_empty());
         assert_eq!(d.engine().log, vec!["cell.set", "view.zoom"]);
+    }
+
+    struct Counted {
+        rev: u64,
+    }
+    impl Engine for Counted {
+        fn kind(&self) -> EngineKind {
+            EngineKind::Grid
+        }
+        fn execute(&mut self, c: &str, _: &Json) -> Result<Json, BridgeError> {
+            if c == "really.changes" {
+                self.rev += 1;
+            }
+            Ok(json!(null))
+        }
+        fn is_mutating(&self, _: &str) -> bool {
+            true // pessimistic flag: the revision counter must win
+        }
+        fn revision(&self) -> Option<u64> {
+            Some(self.rev)
+        }
+    }
+
+    #[test]
+    fn revision_counter_overrides_the_mutating_flag() {
+        let mut d = Dispatcher::new(Counted { rev: 1 });
+        d.execute("set.same.value", &json!({})).unwrap(); // flagged mutating, revision unchanged
+        d.execute("really.changes", &json!({})).unwrap();
+        let ch = d.drain_changes();
+        assert_eq!(ch, vec![Change { seq: 1, command: "really.changes".into() }]);
     }
 
     #[test]

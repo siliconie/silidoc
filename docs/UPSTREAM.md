@@ -85,7 +85,7 @@ If step 3 or 4 fails, **do not commit**: `git -C ..\gridcraft checkout <commit f
 returns the engine to the last tested state. `UPSTREAM.lock` is what makes a build reproducible, and
 what CI uses to check out matching engine commits.
 
-## Contract tests (`crates/alfadoc-engines`, from M1)
+## Contract tests (in each `crates/alfadoc-adapter-*`)
 
 A contract test uses *exactly* the upstream surface Alfadoc relies on and nothing else: specific command
 ids with specific parameters, and the read/write round-trips the adapters need. When upstream renames

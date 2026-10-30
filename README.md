@@ -24,7 +24,7 @@ Data is shared between all three and stays in sync with the files you import it 
 
 Milestone M0 is done: the data model, `.alfadoc` container, maix store, link registry, three-way
 merge and link-sync core are implemented and tested (42 tests), and the workspace resolves together
-with all three engines on one egui. The engine adapters and the app shell are M1.
+with all three engines on one egui. The GridCraft adapter is done (M1); the Deck and Word adapters and the app shell are next.
 
 Expected layout (see [UPSTREAM](docs/UPSTREAM.md)): `alfadoc` next to `gridcraft`, `wordcraft`, `deckcraft`.
 
