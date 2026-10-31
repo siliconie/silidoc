@@ -5,6 +5,8 @@
 //! The drawing is plain egui shapes (a perspective projection and a back-to-front sort), so it
 //! needs no graphics API and works the same on every platform, including the browser.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use alfadoc_model::Maix;
 use egui::{Align2, Color32, FontId, Pos2, Rect as ScreenRect, Sense, Shape, Stroke, vec2};
 
@@ -33,8 +35,43 @@ impl Along {
     }
 }
 
+/// What the floor of the chart is made of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Mode {
+    /// Two dimensions: every value of each (and plain) is a place on the floor, the height is the
+    /// numbers of the selection stored under it.
+    Dimensions,
+    /// Rows, columns and one dimension, two of them on the floor.
+    Cells,
+}
+
+/// How the numbers of the selection under one place on the floor become one height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Agg {
+    Sum,
+    Average,
+    Count,
+}
+
+impl Agg {
+    const ALL: [Agg; 3] = [Agg::Sum, Agg::Average, Agg::Count];
+
+    fn name(self) -> &'static str {
+        match self {
+            Agg::Sum => "Sum",
+            Agg::Average => "Average",
+            Agg::Count => "Count",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct CubeState {
+    pub mode: Mode,
+    /// The two dimensions of the floor in [`Mode::Dimensions`] (the second may be empty).
+    pub x_key: String,
+    pub z_key: String,
+    pub agg: Agg,
     pub open: bool,
     /// Across the floor, and into the screen.
     pub x: Along,
@@ -50,7 +87,7 @@ pub(super) struct CubeState {
 
 impl Default for CubeState {
     fn default() -> Self {
-        CubeState { open: false, x: Along::Cols, z: Along::Rows, key: String::new(), fixed: 0, yaw: -0.6, pitch: 0.55, zoom: 1.0 }
+        CubeState { mode: Mode::Cells, x_key: String::new(), z_key: String::new(), agg: Agg::Sum, open: false, x: Along::Cols, z: Along::Rows, key: String::new(), fixed: 0, yaw: -0.6, pitch: 0.55, zoom: 1.0 }
     }
 }
 
@@ -90,6 +127,9 @@ pub(super) struct Cube {
     pub third_label: String,
     pub min: f64,
     pub max: f64,
+    /// What the two floor directions are called.
+    pub x_title: String,
+    pub z_title: String,
 }
 
 fn number_of(v: &alfadoc_model::Value) -> Option<f64> {
@@ -163,6 +203,90 @@ pub(super) fn build(maix: &Maix, sheet: u16, range: Range, st: &CubeState, value
         third_label: label(third, range, values, fixed),
         min,
         max,
+        x_title: ax.name(&st.key),
+        z_title: az.name(&st.key),
+    }
+}
+
+/// The places on the floor along one dimension: plain, then each value.
+fn places(catalog: &BTreeMap<String, BTreeSet<String>>, key: &str) -> Vec<Option<String>> {
+    if key.is_empty() {
+        return vec![None];
+    }
+    std::iter::once(None).chain(catalog.get(key).into_iter().flatten().map(|v| Some(v.clone()))).take(MAX_SIDE).collect()
+}
+
+/// Reads the chart of two dimensions: each place on the floor is one value of each dimension
+/// (or plain), and the height is the numbers of `range` stored under exactly that vector, with
+/// every other dimension as chosen now. One pass over the stored cells, whatever the number of places.
+pub(super) fn build_dims(maix: &Maix, sheet: u16, range: Range, st: &CubeState, catalog: &BTreeMap<String, BTreeSet<String>>) -> Cube {
+    let z_key = if st.z_key == st.x_key { "" } else { st.z_key.as_str() };
+    let xs = places(catalog, &st.x_key);
+    let zs = places(catalog, z_key);
+    let mut base = maix.active_dims.clone();
+    base.remove(&st.x_key);
+    base.remove(z_key);
+    // Which place each stored vector belongs to.
+    let mut at: HashMap<u64, (usize, usize)> = HashMap::new();
+    for (zi, zv) in zs.iter().enumerate() {
+        for (xi, xv) in xs.iter().enumerate() {
+            let mut dims = base.clone();
+            if let Some(v) = xv {
+                dims.insert(st.x_key.clone(), v.clone());
+            }
+            if let Some(v) = zv {
+                dims.insert(z_key.to_string(), v.clone());
+            }
+            if let Some(hash) = maix.vectors.find(&dims) {
+                at.insert(hash, (xi, zi));
+            }
+        }
+    }
+    let mut sum = vec![vec![0.0f64; xs.len()]; zs.len()];
+    let mut count = vec![vec![0usize; xs.len()]; zs.len()];
+    if let Ok(sh) = maix.sheet(sheet) {
+        for (_, _, hash, cell) in sh.cells_in(range.0, range.1, range.2, range.3) {
+            if let (Some(&(xi, zi)), Some(n)) = (at.get(&hash), number_of(&cell.value))
+                && let (Some(s), Some(c)) = (sum.get_mut(zi).and_then(|l| l.get_mut(xi)), count.get_mut(zi).and_then(|l| l.get_mut(xi)))
+            {
+                *s += n;
+                *c += 1;
+            }
+        }
+    }
+    let mut heights = vec![vec![None; xs.len()]; zs.len()];
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for zi in 0..zs.len() {
+        for xi in 0..xs.len() {
+            let (n, s) = (count[zi][xi], sum[zi][xi]);
+            let h = match st.agg {
+                Agg::Count => (n > 0).then_some(n as f64),
+                Agg::Sum => (n > 0).then_some(s),
+                Agg::Average => (n > 0).then(|| s / n as f64),
+            };
+            heights[zi][xi] = h;
+            if let Some(h) = h {
+                min = min.min(h);
+                max = max.max(h);
+            }
+        }
+    }
+    if min > max {
+        (min, max) = (0.0, 0.0);
+    }
+    let name = |v: &Option<String>| v.clone().unwrap_or_else(|| "plain".to_string());
+    let held: Vec<String> = base.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    Cube {
+        x_labels: xs.iter().map(name).collect(),
+        z_labels: zs.iter().map(name).collect(),
+        heights,
+        third: Along::Dim,
+        third_len: 1,
+        third_label: if held.is_empty() { "no other dimension chosen".to_string() } else { held.join(", ") },
+        min,
+        max,
+        x_title: if st.x_key.is_empty() { "plain".to_string() } else { st.x_key.clone() },
+        z_title: if z_key.is_empty() { String::new() } else { z_key.to_string() },
     }
 }
 
@@ -296,8 +420,16 @@ fn faces(cube: &Cube, cam: &Camera, height: f32) -> Vec<Face> {
 impl super::DataView {
     pub(super) fn open_cube(&mut self, maix: &Maix) {
         self.cube.open = true;
+        let catalog = maix.dimension_catalog();
         if self.cube.key.is_empty() {
-            self.cube.key = maix.active_dims.keys().next().cloned().or_else(|| maix.dimension_catalog().keys().next().cloned()).unwrap_or_default();
+            self.cube.key = maix.active_dims.keys().next().cloned().or_else(|| catalog.keys().next().cloned()).unwrap_or_default();
+        }
+        if !catalog.contains_key(&self.cube.x_key) {
+            let mut keys = catalog.keys();
+            self.cube.x_key = keys.next().cloned().unwrap_or_default();
+            self.cube.z_key = keys.next().cloned().unwrap_or_default();
+            // With dimensions to show, start with the picture of all of them.
+            self.cube.mode = if catalog.is_empty() { Mode::Cells } else { Mode::Dimensions };
         }
     }
 
@@ -307,49 +439,91 @@ impl super::DataView {
         }
         let catalog = maix.dimension_catalog();
         let values: Vec<String> = catalog.get(&self.cube.key).map(|s| s.iter().cloned().collect()).unwrap_or_default();
-        // One cell selected: show the whole used area.
         let sel = self.sel();
-        let range = if sel.0 == sel.2 && sel.1 == sel.3 {
+        let one_cell = sel.0 == sel.2 && sel.1 == sel.3;
+        let mut st = self.cube.clone();
+        if st.mode == Mode::Dimensions && catalog.is_empty() {
+            st.mode = Mode::Cells;
+        }
+        // Rows and columns: one selected cell means the whole used area. Dimensions: it means that cell.
+        let range = if one_cell && st.mode == Mode::Cells {
             let used = maix.sheet(sheet).map_or((0, 0), alfadoc_model::maix::Sheet::extent);
             (0, 0, used.0.saturating_sub(1), used.1.saturating_sub(1))
         } else {
             effective(maix, sheet, sel)
         };
-        let mut st = self.cube.clone();
         let mut open = true;
-        egui::Window::new("3D view").open(&mut open).collapsible(false).default_size([700.0, 560.0]).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            let key = st.key.clone();
+        egui::Window::new("3D view").open(&mut open).collapsible(false).default_size([720.0, 580.0]).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Across");
-                along_box(ui, "cube_x", &mut st.x, &key, !catalog.is_empty());
-                ui.label("Depth");
-                along_box(ui, "cube_z", &mut st.z, &key, !catalog.is_empty());
-                if !catalog.is_empty() {
-                    ui.label("Dimension");
-                    egui::ComboBox::from_id_salt("cube_key").selected_text(&st.key).show_ui(ui, |ui| {
-                        for k in catalog.keys() {
-                            if ui.selectable_label(st.key == *k, k).clicked() {
-                                st.key = k.clone();
-                                st.fixed = 0;
-                            }
-                        }
-                    });
-                }
+                ui.radio_value(&mut st.mode, Mode::Dimensions, "Dimensions").on_hover_text("Every value of the chosen dimensions on the floor; the height is your selection's numbers under each");
+                ui.radio_value(&mut st.mode, Mode::Cells, "Rows and columns").on_hover_text("The cells of the selection on the floor, for one value of a dimension");
                 if ui.button("Reset view").clicked() {
                     st.reset_view();
                 }
             });
-            let cube = build(maix, sheet, range, &st, &values);
-            ui.horizontal(|ui| {
-                ui.label(format!("{} held at", cube.third_label_name(&st.key)));
-                let mut at = st.fixed.min(cube.third_len.saturating_sub(1));
-                if cube.third_len > 1 {
-                    ui.add(egui::Slider::new(&mut at, 0..=cube.third_len - 1).show_value(false));
-                    st.fixed = at;
+            let cube = if st.mode == Mode::Dimensions {
+                ui.horizontal_wrapped(|ui| {
+                    let keys: Vec<&String> = catalog.keys().collect();
+                    ui.label("Across");
+                    egui::ComboBox::from_id_salt("cube_xkey").selected_text(&st.x_key).show_ui(ui, |ui| {
+                        for k in &keys {
+                            ui.selectable_value(&mut st.x_key, (*k).clone(), k.as_str());
+                        }
+                    });
+                    ui.label("Depth");
+                    let z_text = if st.z_key.is_empty() { "(none)".to_string() } else { st.z_key.clone() };
+                    egui::ComboBox::from_id_salt("cube_zkey").selected_text(z_text).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut st.z_key, String::new(), "(none)");
+                        for k in keys.iter().filter(|k| ***k != st.x_key) {
+                            ui.selectable_value(&mut st.z_key, (*k).clone(), k.as_str());
+                        }
+                    });
+                    ui.label("Height");
+                    egui::ComboBox::from_id_salt("cube_agg").selected_text(st.agg.name()).show_ui(ui, |ui| {
+                        for a in Agg::ALL {
+                            ui.selectable_value(&mut st.agg, a, a.name());
+                        }
+                    });
+                });
+                if st.z_key == st.x_key {
+                    st.z_key = String::new();
                 }
-                ui.strong(&cube.third_label);
-                ui.weak(format!("(the selection, or the used area when one cell is selected; {} × {} bars)", cube.x_labels.len(), cube.z_labels.len()));
-            });
+                let cube = build_dims(maix, sheet, range, &st, &catalog);
+                ui.weak(format!("{} of the numbers in {} under each place; \"plain\" is the values with none of that dimension. Others held: {}.", st.agg.name().to_lowercase(), if one_cell { "the selected cell".to_string() } else { "the selection".to_string() }, cube.third_label));
+                cube
+            } else {
+                let key = st.key.clone();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Across");
+                    along_box(ui, "cube_x", &mut st.x, &key, !catalog.is_empty());
+                    ui.label("Depth");
+                    along_box(ui, "cube_z", &mut st.z, &key, !catalog.is_empty());
+                    if !catalog.is_empty() {
+                        ui.label("Dimension");
+                        egui::ComboBox::from_id_salt("cube_key").selected_text(&st.key).show_ui(ui, |ui| {
+                            for k in catalog.keys() {
+                                if ui.selectable_label(st.key == *k, k).clicked() {
+                                    st.key = k.clone();
+                                    st.fixed = 0;
+                                }
+                            }
+                        });
+                    }
+                });
+                let cube = build(maix, sheet, range, &st, &values);
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} held at", cube.third_label_name(&st.key)));
+                    let mut at = st.fixed.min(cube.third_len.saturating_sub(1));
+                    if cube.third_len > 1 {
+                        ui.add(egui::Slider::new(&mut at, 0..=cube.third_len - 1).show_value(false));
+                        st.fixed = at;
+                    }
+                    ui.strong(&cube.third_label);
+                    ui.weak("(the selection, or the used area when one cell is selected)");
+                });
+                cube
+            };
+            ui.weak(format!("{} × {} places", cube.x_labels.len(), cube.z_labels.len()));
             let size = vec2(ui.available_width().max(320.0), (ui.available_height() - 24.0).clamp(280.0, 520.0));
             let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
             if response.dragged() {
@@ -427,6 +601,14 @@ fn paint(ui: &egui::Ui, rect: ScreenRect, cube: &Cube, st: &CubeState, hover: Op
             painter.text(p, Align2::CENTER_CENTER, name, font.clone(), ink);
         }
     }
+    if let Some((p, _)) = cam.project([nx / 2.0, 0.0, nz + 0.95]) {
+        painter.text(p, Align2::CENTER_CENTER, &cube.x_title, FontId::proportional(12.0), ink);
+    }
+    if !cube.z_title.is_empty()
+        && let Some((p, _)) = cam.project([-0.95, 0.0, nz / 2.0])
+    {
+        painter.text(p, Align2::CENTER_CENTER, &cube.z_title, FontId::proportional(12.0), ink);
+    }
     let all = faces(cube, &cam, height);
     for f in &all {
         painter.add(Shape::convex_polygon(f.poly.to_vec(), f.colour, Stroke::new(0.5, shade(f.colour, 0.55))));
@@ -453,6 +635,7 @@ fn paint(ui: &egui::Ui, rect: ScreenRect, cube: &Cube, st: &CubeState, hover: Op
 mod tests {
     use super::*;
     use alfadoc_model::{DimVector, Stamp, Value};
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn store() -> (Maix, u16) {
         let mut m = Maix::default();
@@ -551,5 +734,44 @@ mod tests {
         let mid = Pos2::new(nearest.poly.iter().map(|p| p.x).sum::<f32>() / 4.0, nearest.poly.iter().map(|p| p.y).sum::<f32>() / 4.0);
         assert!(inside(&nearest.poly, mid));
         assert!(!inside(&nearest.poly, Pos2::new(-500.0, -500.0)));
+    }
+
+    #[test]
+    fn two_dimensions_with_their_plain_make_the_floor_and_nothing_crosses() {
+        let mut m = Maix::default();
+        let s = m.add_sheet("S");
+        let one = |k: &str, v: &str| -> DimVector { [(k.to_string(), v.to_string())].into_iter().collect() };
+        let both = |a: &str, b: &str| -> DimVector { [("default".to_string(), a.to_string()), ("alfa".to_string(), b.to_string())].into_iter().collect() };
+        let stamp = Stamp::new("t", 1);
+        m.set(s, 0, 0, &DimVector::new(), Value::Int(1), &stamp).unwrap();
+        m.set(s, 0, 0, &one("default", "d1"), Value::Int(10), &stamp).unwrap();
+        m.set(s, 0, 0, &one("default", "d2"), Value::Int(20), &stamp).unwrap();
+        m.set(s, 0, 0, &one("alfa", "alfa1"), Value::Int(100), &stamp).unwrap();
+        m.set(s, 0, 0, &one("alfa", "alfa2"), Value::Int(200), &stamp).unwrap();
+        m.set(s, 0, 0, &both("d1", "alfa1"), Value::Int(1000), &stamp).unwrap();
+        m.set(s, 1, 0, &one("default", "d1"), Value::Int(5), &stamp).unwrap();
+        for (k, v) in [("default", "d1"), ("default", "d2"), ("alfa", "alfa1"), ("alfa", "alfa2")] {
+            m.declare_dimension(k, Some(v));
+        }
+        let catalog: BTreeMap<String, BTreeSet<String>> = m.dimension_catalog();
+        let st = CubeState { mode: Mode::Dimensions, x_key: "default".into(), z_key: "alfa".into(), ..Default::default() };
+        // Places: plain, d1, d2 across; plain, alfa1, alfa2 deep. One cell selected: A1.
+        let cube = build_dims(&m, s, (0, 0, 0, 0), &st, &catalog);
+        assert_eq!(cube.x_labels, ["plain", "d1", "d2"]);
+        assert_eq!(cube.z_labels, ["plain", "alfa1", "alfa2"]);
+        assert_eq!(cube.heights[0], vec![Some(1.0), Some(10.0), Some(20.0)], "alfa plain: the plain value and each default value");
+        assert_eq!(cube.heights[1], vec![Some(100.0), Some(1000.0), None], "alfa1: alone, with d1, and no cell with d2");
+        assert_eq!(cube.heights[2], vec![Some(200.0), None, None]);
+        // Two rows: the sum adds A1 and A2 where both exist.
+        let cube = build_dims(&m, s, (0, 0, 1, 0), &st, &catalog);
+        assert_eq!(cube.heights[0][1], Some(15.0), "10 + 5");
+        let counted = build_dims(&m, s, (0, 0, 1, 0), &CubeState { agg: Agg::Count, ..st.clone() }, &catalog);
+        assert_eq!(counted.heights[0][1], Some(2.0));
+        let average = build_dims(&m, s, (0, 0, 1, 0), &CubeState { agg: Agg::Average, ..st.clone() }, &catalog);
+        assert_eq!(average.heights[0][1], Some(7.5));
+        // One dimension only: a single row of places.
+        let one_d = build_dims(&m, s, (0, 0, 0, 0), &CubeState { z_key: String::new(), ..st }, &catalog);
+        assert_eq!(one_d.z_labels, ["plain"]);
+        assert_eq!(one_d.heights.len(), 1);
     }
 }

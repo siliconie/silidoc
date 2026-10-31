@@ -8,7 +8,7 @@
 
 mod leave;
 
-use crate::ctxstate::ContextState;
+use crate::ctxstate::{Appearance, ContextState, has_own_look};
 use crate::hosts;
 use crate::data_view::DataView;
 use crate::links_view::LinksTab;
@@ -140,6 +140,8 @@ pub struct Shell {
     pub(crate) deck: Option<SlideApp>,
     /// The look each engine left on the context when its tab was last active.
     saved: [Option<ContextState>; 5],
+    /// Light, dark or follow the system: one choice for every tab.
+    pub(crate) appearance: Appearance,
     /// Frames drawn so far: fonts exist on the context only after the first one.
     frames: u64,
     /// The `.alfadoc` package this window is editing (links, maix and untouched parts live here).
@@ -186,7 +188,8 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(start: Tab, startup: Option<PathBuf>) -> Shell {
-        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), leave: LeaveState::default(), export: ExportDialog::default(), key: None, unlock: None, protect: Protect::default(), recover_prompt: vec![], recover_checked: false, calc_seen: 0, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default(), links_view: LinksTab::default() }
+        crate::skin::install();
+        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None, None], appearance: Appearance::default(), frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), leave: LeaveState::default(), export: ExportDialog::default(), key: None, unlock: None, protect: Protect::default(), recover_prompt: vec![], recover_checked: false, calc_seen: 0, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default(), links_view: LinksTab::default() }
     }
 
     fn ensure(&mut self, ctx: &egui::Context, tab: Tab) {
@@ -202,15 +205,45 @@ impl Shell {
         if next == self.active {
             return;
         }
-        if self.frames > 0 {
+        if self.frames > 0 && has_own_look(self.active.index()) {
             self.saved[self.active.index()] = Some(ContextState::capture(ctx));
         }
         self.active = next;
-        self.ensure(ctx, next);
-        if let Some(state) = &self.saved[next.index()] {
+        // Data and Links have no editor of their own: they wear the Sheet's look, always.
+        let look = if has_own_look(next.index()) { next } else { Tab::Sheet };
+        self.ensure(ctx, look);
+        if let Some(state) = &self.saved[look.index()] {
             state.restore(ctx);
         }
+        self.apply_appearance(ctx);
         ctx.request_repaint();
+    }
+
+    /// Makes every editor, and the tabs without one, agree on light or dark. Cheap and idempotent,
+    /// so it runs every pass; the editors' own theme menus are overruled by the tab bar's choice.
+    fn apply_appearance(&mut self, ctx: &egui::Context) {
+        let a = self.appearance;
+        let dark = a.is_dark(ctx.system_theme());
+        if let Some(app) = self.grid.as_mut() {
+            app.ui.system_theme = a == Appearance::System;
+            app.ui.dark = dark;
+        }
+        if let Some(app) = self.word.as_mut() {
+            app.ui.theme = match a {
+                Appearance::System => wordcraft_ui_egui::theme::Appearance::System,
+                Appearance::Light => wordcraft_ui_egui::theme::Appearance::Light,
+                Appearance::Dark => wordcraft_ui_egui::theme::Appearance::Dark,
+            };
+        }
+        if let Some(app) = self.deck.as_mut() {
+            let now = matches!(app.ui.brightness, deckcraft_ui_egui::theme::Brightness::Dark);
+            if now != dark {
+                let _ = app.run("view.dark", serde_json::json!({"on": dark}));
+            }
+        }
+        if matches!(self.active, Tab::Data | Tab::Links) {
+            ctx.set_theme(a.preference());
+        }
     }
 
     pub(crate) fn say(&mut self, ctx: &egui::Context, text: impl Into<String>) {
@@ -663,6 +696,11 @@ impl Shell {
                     }
                 }
                 ui.separator();
+                egui::ComboBox::from_id_salt("alfadoc_appearance").width(64.0).selected_text(self.appearance.label()).show_ui(ui, |ui| {
+                    for a in Appearance::ALL {
+                        ui.selectable_value(&mut self.appearance, a, a.label());
+                    }
+                }).response.on_hover_text("Light, dark or follow the system: the same in every tab");
                 if ui.button("Link…").on_hover_text("Make a new link between tables and ranges in the editors (all links are in the Links tab)").clicked() {
                     self.draft.open = !self.draft.open;
                 }
@@ -718,6 +756,7 @@ impl eframe::App for Shell {
         self.recovery_step(ctx);
         let active = self.active;
         self.ensure(ctx, active);
+        self.apply_appearance(ctx);
         match active {
             Tab::Sheet => {
                 if let Some(app) = self.grid.as_mut() {

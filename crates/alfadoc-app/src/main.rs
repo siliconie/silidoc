@@ -19,6 +19,7 @@ mod package;
 mod protect;
 mod recovery;
 mod shell;
+mod skin;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

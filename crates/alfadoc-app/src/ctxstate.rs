@@ -40,3 +40,67 @@ impl ContextState {
         }
     }
 }
+
+/// The interface brightness for the whole window. One choice, applied to every tab, so switching
+/// tabs never flips between light and dark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "Auto",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+
+    pub fn preference(self) -> egui::ThemePreference {
+        match self {
+            Appearance::System => egui::ThemePreference::System,
+            Appearance::Light => egui::ThemePreference::Light,
+            Appearance::Dark => egui::ThemePreference::Dark,
+        }
+    }
+
+    /// Whether the window is dark now; `system` is what the operating system reports, if anything.
+    pub fn is_dark(self, system: Option<egui::Theme>) -> bool {
+        match self {
+            Appearance::Dark => true,
+            Appearance::Light => false,
+            Appearance::System => system == Some(egui::Theme::Dark),
+        }
+    }
+}
+
+/// The tabs that have no editor of their own (Data, Links) wear the Sheet's look, and are never
+/// snapshotted: otherwise they would freeze whatever the previous tab happened to leave behind.
+pub fn has_own_look(index: usize) -> bool {
+    index < 3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_appearance_decides_dark_for_every_tab() {
+        assert!(Appearance::Dark.is_dark(None));
+        assert!(!Appearance::Light.is_dark(Some(egui::Theme::Dark)));
+        assert!(Appearance::System.is_dark(Some(egui::Theme::Dark)));
+        assert!(!Appearance::System.is_dark(None));
+    }
+
+    #[test]
+    fn only_the_three_editors_keep_their_own_look() {
+        assert!([0, 1, 2].into_iter().all(has_own_look));
+        assert!(!has_own_look(3) && !has_own_look(4));
+    }
+}

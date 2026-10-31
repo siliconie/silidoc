@@ -370,6 +370,8 @@ impl DataView {
         }
         ui.separator();
         ui.checkbox(&mut self.gridlines, "Gridlines");
+        ui.checkbox(&mut self.dim_bar, "Dimension bar");
+        ui.checkbox(&mut self.combine_dims, "Combine dimensions").on_hover_text("Choose a value in several dimensions at once. What you type is then stored under the combination.");
         ui.menu_button("Zoom", |ui| {
             for z in [0.5_f32, 0.75, 1.0, 1.25, 1.5, 2.0] {
                 if ui.selectable_label((self.zoom - z).abs() < 0.01, format!("{}%", (z * 100.0).round())).clicked() {

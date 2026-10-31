@@ -22,6 +22,7 @@
 mod axis;
 mod compare;
 mod cube;
+mod dims_ui;
 mod extras_ui;
 mod filter;
 mod find;
@@ -160,6 +161,13 @@ pub struct DataView {
     /// The "new dimension" boxes of the Dimensions menu.
     dim_key: String,
     dim_value: String,
+    /// The dimension the keys and the dimension bar act on (the one last touched).
+    dim_focus: String,
+    /// Whether the dimension bar shows above the grid.
+    dim_bar: bool,
+    /// Whether several dimensions can be chosen at once (their combination is then its own set
+    /// of values). Off: choosing a value in one dimension unchooses the others.
+    combine_dims: bool,
     /// The "new value" box of each dimension in the Dimensions menu.
     dim_inputs: std::collections::BTreeMap<String, String>,
     /// Scroll offsets (x, y) of the scrolling part, in sheet units.
@@ -218,6 +226,9 @@ impl Default for DataView {
             needs_calc: false,
             dim_key: String::new(),
             dim_value: String::new(),
+            dim_focus: String::new(),
+            dim_bar: true,
+            combine_dims: false,
             dim_inputs: std::collections::BTreeMap::new(),
             scroll: (0.0, 0.0),
             zoom: 1.0,
@@ -672,6 +683,7 @@ impl DataView {
         self.menu_bar(ui, maix, sheet, now_ms, &mut batch);
         self.toolbar(ui, maix, sheet, now_ms);
         self.bar_row(ui, maix, sheet, now_ms, &mut batch);
+        self.dimension_bar(ui, maix);
         let footer = 34.0;
         let grid_height = (ui.available_height() - footer).max(80.0);
         self.grid(ui, maix, sheet, now_ms, grid_height, &mut batch);
@@ -821,6 +833,8 @@ impl DataView {
                     Key::ArrowUp => arrow(self, maix, -1, 0),
                     Key::ArrowLeft => arrow(self, maix, 0, -1),
                     Key::ArrowRight => arrow(self, maix, 0, 1),
+                    Key::OpenBracket if cmd => self.cycle_dimension(maix, false, extend),
+                    Key::CloseBracket if cmd => self.cycle_dimension(maix, true, extend),
                     Key::PageDown => self.step(maix, sheet, i64::from(PAGE_ROWS), 0, extend),
                     Key::PageUp => self.step(maix, sheet, -i64::from(PAGE_ROWS), 0, extend),
                     Key::Home => {
@@ -964,45 +978,42 @@ impl DataView {
                     maix.active_dims.clear();
                 }
             });
+            ui.checkbox(&mut self.combine_dims, "Combine dimensions").on_hover_text("Off: choosing a value in one dimension unchooses the others, so each dimension has its own values and \"plain\" is the one shared base. On: choose a value in several dimensions at once; what you type is then stored under that combination, separate from each dimension alone.");
             ui.separator();
             let catalog = maix.dimension_catalog();
             if catalog.is_empty() {
                 ui.weak("No dimensions yet. Add one below, for example scenario with the value actual.");
             }
             for (key, values) in &catalog {
-                let current = maix.active_dims.get(key).cloned();
                 ui.horizontal(|ui| {
-                    ui.label(key);
-                    egui::ComboBox::from_id_salt(("dimension", key)).selected_text(current.clone().unwrap_or_else(|| "(none)".to_string())).show_ui(ui, |ui| {
-                        if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                            maix.active_dims.remove(key);
-                        }
-                        for value in values {
-                            let used = maix.dimension_in_use(key, Some(value));
-                            let text = if used { value.clone() } else { format!("{value}  (no data yet)") };
-                            if ui.selectable_label(current.as_deref() == Some(value.as_str()), text).clicked() {
-                                maix.active_dims.insert(key.clone(), value.clone());
-                            }
-                        }
-                    });
-                    let input = self.dim_inputs.entry(key.clone()).or_default();
-                    let r = ui.add(egui::TextEdit::singleline(input).hint_text("new value").desired_width(80.0));
-                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if (ui.button("Add").on_hover_text("Add this value to the dimension and use it").clicked() || enter) && maix.declare_dimension(key, Some(input.as_str())) {
-                        maix.active_dims.insert(key.clone(), input.trim().to_string());
-                        input.clear();
-                    }
-                    let removable = current.as_deref().is_some_and(|v| !maix.dimension_in_use(key, Some(v)));
-                    if ui.add_enabled(removable, egui::Button::new("−")).on_hover_text("Remove the chosen value (only while no cell is stored under it)").on_disabled_hover_text("Choose a value that has no data to remove it").clicked()
-                        && let Some(v) = &current
-                    {
-                        maix.forget_dimension(key, Some(v));
-                    }
-                    if ui.add_enabled(!maix.dimension_in_use(key, None), egui::Button::new("×")).on_hover_text("Remove this dimension").on_disabled_hover_text("Cells are stored under this dimension, so it stays").clicked() {
+                    ui.strong(key);
+                    if ui.add_enabled(!maix.dimension_in_use(key, None), egui::Button::new("Remove dimension").small()).on_hover_text("Remove this dimension").on_disabled_hover_text("Cells are stored under this dimension, so it stays").clicked() {
                         maix.forget_dimension(key, None);
                         self.dim_inputs.remove(key);
                     }
                 });
+                ui.horizontal_wrapped(|ui| self.dimension_chips(ui, maix, key, values));
+                ui.horizontal(|ui| {
+                    let input = self.dim_inputs.entry(key.clone()).or_default();
+                    let r = ui.add(egui::TextEdit::singleline(input).hint_text("new value").desired_width(100.0));
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    if (ui.button("Add").on_hover_text("Add this value to the dimension and use it").clicked() || enter) && maix.declare_dimension(key, Some(input.as_str())) {
+                        if !self.combine_dims {
+                            maix.active_dims.clear();
+                        }
+                        maix.active_dims.insert(key.clone(), input.trim().to_string());
+                        input.clear();
+                        self.dim_focus = key.clone();
+                    }
+                    let current = maix.active_dims.get(key).cloned();
+                    let removable = current.as_deref().is_some_and(|v| !maix.dimension_in_use(key, Some(v)));
+                    if ui.add_enabled(removable, egui::Button::new("Remove chosen value")).on_hover_text("Remove the chosen value (only while no cell is stored under it)").on_disabled_hover_text("Choose a value that has no data yet to remove it").clicked()
+                        && let Some(v) = &current
+                    {
+                        maix.forget_dimension(key, Some(v));
+                    }
+                });
+                ui.add_space(4.0);
             }
             ui.separator();
             ui.strong("New dimension");
@@ -1011,6 +1022,9 @@ impl DataView {
                 ui.add(egui::TextEdit::singleline(&mut self.dim_value).hint_text("first value").desired_width(95.0));
                 let ready = !self.dim_key.trim().is_empty() && !self.dim_value.trim().is_empty();
                 if ui.add_enabled(ready, egui::Button::new("Add")).clicked() && maix.declare_dimension(&self.dim_key, Some(&self.dim_value)) {
+                    if !self.combine_dims {
+                        maix.active_dims.clear();
+                    }
                     maix.active_dims.insert(self.dim_key.trim().to_string(), self.dim_value.trim().to_string());
                     self.dim_key.clear();
                     self.dim_value.clear();

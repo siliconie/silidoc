@@ -144,6 +144,12 @@ impl Sheet {
         self.cells.iter().filter_map(|((r, c, d), cell)| cell.formula.as_ref().map(|f| (*r, *c, *d, f.clone()))).collect()
     }
 
+    /// The cells in rows `top..=bottom` and columns `left..=right` under every dimension vector,
+    /// as `(row, col, dim hash, cell)`.
+    pub fn cells_in(&self, top: u32, left: u16, bottom: u32, right: u16) -> impl Iterator<Item = (u32, u16, u64, &Cell)> {
+        self.cells.range((top, 0, 0)..=(bottom, u16::MAX, u64::MAX)).filter(move |((_, c, _), _)| (left..=right).contains(c)).map(|((r, c, d), cell)| (*r, *c, *d, cell))
+    }
+
     /// All cells at `dim`, in row-major order.
     pub fn slice(&self, dim: u64) -> impl Iterator<Item = (u32, u16, &Cell)> {
         self.cells.iter().filter(move |((_, _, d), _)| *d == dim).map(|((r, c, _), cell)| (*r, *c, cell))
