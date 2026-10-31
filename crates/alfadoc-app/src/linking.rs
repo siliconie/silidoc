@@ -218,6 +218,8 @@ enum Action {
     Review(Option<String>),
     MarkVariant,
     KeepVariants,
+    MarkSlideVariant,
+    ShowSlideVariants,
 }
 
 pub(crate) fn place_of_endpoint(e: &Endpoint) -> Option<Place> {
@@ -865,6 +867,15 @@ impl Shell {
                             actions.push(Action::KeepVariants);
                         }
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Slides:");
+                        if ui.button("Mark the selected shapes").on_hover_text("The shapes you selected on the current slide will belong to the current dimensions").clicked() {
+                            actions.push(Action::MarkSlideVariant);
+                        }
+                        if ui.button("Show only these shapes").on_hover_text("Shows the tagged shapes that fit the current dimensions and hides the others (Undo in the Slides tab brings them back)").clicked() {
+                            actions.push(Action::ShowSlideVariants);
+                        }
+                    });
                 }
             });
             ui.separator();
@@ -928,6 +939,27 @@ impl Shell {
                         Some(app) => match WordEngine::borrowed(&mut app.session).keep_variants(&dims) {
                             Ok(0) => "Nothing to remove: every block belongs to these dimensions.".to_string(),
                             Ok(n) => format!("Removed {n} block(s) for other dimensions. Undo in the Document brings them back."),
+                            Err(e) => e.to_string(),
+                        },
+                    };
+                }
+                Action::MarkSlideVariant => {
+                    let dims = self.package.maix.active_dims.clone();
+                    self.draft.message = match self.deck.as_mut() {
+                        None => "Open the Slides tab first.".to_string(),
+                        Some(app) => match DeckEngine::borrowed(&mut app.session).mark_variant(&dims) {
+                            Ok(n) => format!("Marked {n} shape(s). They now belong to these dimensions."),
+                            Err(e) => e.to_string(),
+                        },
+                    };
+                }
+                Action::ShowSlideVariants => {
+                    let dims = self.package.maix.active_dims.clone();
+                    self.draft.message = match self.deck.as_mut() {
+                        None => "Open the Slides tab first.".to_string(),
+                        Some(app) => match DeckEngine::borrowed(&mut app.session).show_variants(&dims) {
+                            Ok(0) => "Nothing to change: every tagged shape already fits these dimensions.".to_string(),
+                            Ok(n) => format!("Changed {n} shape(s): shown if they fit these dimensions, hidden if not."),
                             Err(e) => e.to_string(),
                         },
                     };

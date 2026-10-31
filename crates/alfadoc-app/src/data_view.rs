@@ -661,7 +661,7 @@ impl DataView {
         self.prompt_window(ui.ctx(), maix, sheet, now_ms, &mut batch);
         self.find_window(ui.ctx(), maix, sheet, now_ms, &mut batch);
         self.filter_window(ui.ctx(), maix, sheet);
-        self.compare_window(ui.ctx(), maix, sheet);
+        self.compare_window(ui.ctx(), maix, sheet, now_ms);
         let extra = std::mem::take(&mut self.steps);
         let mut changed = maix.sheets.len() != sheets_before;
         if !batch.is_empty() || !extra.is_empty() || self.needs_calc || maix.history.len() != history_before {

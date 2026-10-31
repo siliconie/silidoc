@@ -14,7 +14,8 @@
 
 use std::borrow::BorrowMut;
 use alfadoc_bridge::{BridgeError, CellChange, Engine, EngineKind, Region, RegionAccess, TableChoice, preview_of, textcell};
-use alfadoc_model::Anchor;
+use alfadoc_model::variant::{find_tag, visible, with_variant};
+use alfadoc_model::{Anchor, DimVector};
 use deckcraft_engine::model::{Shape, ShapeId, ShapeKind, SlideId};
 use deckcraft_engine::{EngineError, Session, find_command};
 use serde_json::{Value as Json, json};
@@ -124,6 +125,70 @@ impl<S: BorrowMut<Session>> DeckEngine<S> {
             walk(&slide.shapes, i, 0, &mut out);
         }
         Ok(out)
+    }
+
+    /// Marks the selected shapes of the current slide as a **variant**: they belong to the audience
+    /// or language `variant` names. The tag is kept in the shape's alt text (`alfadoc:variant={…}`,
+    /// after whatever alt text it had), which survives a `.pptx` round trip and never changes the
+    /// shape's name, so links to it keep working. Returns how many shapes were marked.
+    pub fn mark_variant(&mut self, variant: &DimVector) -> Result<usize, BridgeError> {
+        let doc = self.s().doc().map_err(map_err)?;
+        let slide = doc.doc.slides.get(doc.selection.slide).ok_or_else(|| BridgeError::BadParams("no current slide".into()))?;
+        let marks: Vec<(u32, String)> = doc
+            .selection
+            .shapes
+            .iter()
+            .filter_map(|id| deckcraft_engine::model::find_shape(&slide.shapes, *id))
+            .map(|sh| (sh.id.0, with_variant(&sh.descr, variant)))
+            .collect();
+        if marks.is_empty() {
+            return Err(BridgeError::BadParams("select a shape on the slide first".into()));
+        }
+        for (id, text) in &marks {
+            self.run("shape.altText", &json!({ "text": text, "ids": [id] }))?;
+        }
+        Ok(marks.len())
+    }
+
+    /// Shows the shapes whose variant fits `active` and hides the others (Show/Hide in the
+    /// Selection Pane, so undo and the `.pptx` keep working). Untagged shapes are not touched.
+    /// Returns how many shapes changed.
+    pub fn show_variants(&mut self, active: &DimVector) -> Result<usize, BridgeError> {
+        fn walk(shapes: &[Shape], slide_index: usize, active: &DimVector, depth: usize, out: &mut Vec<(usize, u32, bool)>) {
+            if depth > MAX_GROUP_DEPTH {
+                return;
+            }
+            for s in shapes {
+                if let Some(tag) = find_tag(&s.descr) {
+                    let show = visible(Some(tag), active);
+                    if s.hidden == show {
+                        out.push((slide_index, s.id.0, show));
+                    }
+                }
+                walk(s.children(), slide_index, active, depth + 1, out);
+            }
+        }
+        let mut todo = vec![];
+        {
+            let doc = self.s().doc().map_err(map_err)?;
+            for (i, slide) in doc.doc.slides.iter().enumerate() {
+                walk(&slide.shapes, i, active, 0, &mut todo);
+            }
+        }
+        if todo.is_empty() {
+            return Ok(0);
+        }
+        let back = self.current_slide()?;
+        let mut result = Ok(());
+        for (slide_index, id, show) in &todo {
+            let step = self.go(*slide_index).and_then(|()| self.run("shape.visible", &json!({ "visible": show, "ids": [id] })).map(|_| ()));
+            if step.is_err() {
+                result = step;
+                break;
+            }
+        }
+        self.go(back)?;
+        result.map(|()| todo.len())
     }
 
     /// How many tables the presentation holds, named or not.
@@ -387,6 +452,33 @@ mod tests {
     }
 
     #[test]
+    fn variant_shapes_are_shown_or_hidden_for_the_active_dimensions() {
+        let (mut d, a) = deck_with_table();
+        let table = |d: &DeckEngine| d.session().doc().unwrap().doc.slides[0].shapes.iter().find(|s| s.name == "sales").cloned().unwrap();
+        let id = table(&d).id;
+        d.execute("selection.select", &json!({ "id": id.0 })).unwrap();
+        let dims = |v: &str| -> DimVector { [("audience".to_string(), v.to_string())].into_iter().collect() };
+        assert_eq!(d.mark_variant(&dims("client")).unwrap(), 1);
+        let shape = table;
+        assert!(shape(&d).descr.contains("alfadoc:variant="));
+        assert_eq!(shape(&d).name, "sales", "the name, and so the link, is untouched");
+        assert_eq!(d.show_variants(&dims("client")).unwrap(), 0, "already shown");
+        assert_eq!(d.show_variants(&dims("internal")).unwrap(), 1);
+        assert!(shape(&d).hidden);
+        assert_eq!(d.show_variants(&dims("internal")).unwrap(), 0);
+        assert_eq!(d.show_variants(&dims("client")).unwrap(), 1);
+        assert!(!shape(&d).hidden);
+        // The link still finds the table.
+        assert!(d.read_region(&a).is_ok());
+    }
+
+    #[test]
+    fn marking_needs_a_selected_shape() {
+        let mut d = DeckEngine::new();
+        assert!(matches!(d.mark_variant(&DimVector::new()), Err(BridgeError::BadParams(_))));
+    }
+
+    #[test]
     fn a_sync_pass_is_one_undo_step() {
         let (mut d, a) = deck_with_table();
         let changes = [
@@ -453,7 +545,7 @@ mod tests {
     fn every_command_the_adapter_uses_still_exists() {
         let d = DeckEngine::new();
         let ids: Vec<&str> = d.session().commands().iter().map(|c| c.id).collect();
-        for needed in ["insert.table", "shape.rename", "text.set", "slide.go", "slide.new", "file.new"] {
+        for needed in ["insert.table", "shape.rename", "shape.altText", "shape.visible", "text.set", "slide.go", "slide.new", "file.new"] {
             assert!(ids.contains(&needed), "DeckCraft command {needed} vanished upstream");
         }
         let doc = d.session().doc().unwrap();

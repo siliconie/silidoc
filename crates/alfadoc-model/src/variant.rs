@@ -18,6 +18,18 @@ pub fn parse_variant_tag(tag: &str) -> Option<DimVector> {
     serde_json::from_str::<DimVector>(tag.strip_prefix(PREFIX)?).ok()
 }
 
+/// The variant tag inside a longer text (a shape's alt text may say more than the tag): from the
+/// marker to the end.
+pub fn find_tag(text: &str) -> Option<&str> {
+    text.find(PREFIX).map(|i| &text[i..])
+}
+
+/// `text` with its variant tag (if any) replaced by the one for `variant`.
+pub fn with_variant(text: &str, variant: &DimVector) -> String {
+    let base = text.find(PREFIX).map_or(text, |i| &text[..i]).trim_end();
+    if base.is_empty() { variant_tag(variant) } else { format!("{base} {}", variant_tag(variant)) }
+}
+
 /// Whether a variant is visible under `active`: every pair of the variant is in `active`.
 pub fn shown(variant: &DimVector, active: &DimVector) -> bool {
     variant.iter().all(|(k, v)| active.get(k) == Some(v))
@@ -43,6 +55,20 @@ mod tests {
         assert_eq!(parse_variant_tag(&variant_tag(&variant)), Some(variant));
         assert_eq!(parse_variant_tag("alfadoc:link=L1"), None);
         assert_eq!(parse_variant_tag("alfadoc:variant={oops"), None);
+    }
+
+    #[test]
+    fn tags_are_found_inside_longer_text_and_replaced() {
+        let client = v(&[("audience", "client")]);
+        let internal = v(&[("audience", "internal")]);
+        let text = with_variant("Company logo", &client);
+        assert_eq!(find_tag(&text).and_then(parse_variant_tag), Some(client.clone()));
+        assert!(text.starts_with("Company logo "));
+        let again = with_variant(&text, &internal);
+        assert_eq!(find_tag(&again).and_then(parse_variant_tag), Some(internal));
+        assert!(again.starts_with("Company logo ") && !again.contains("client"));
+        assert_eq!(with_variant("", &client), variant_tag(&client));
+        assert_eq!(find_tag("plain alt text"), None);
     }
 
     #[test]

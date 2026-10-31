@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use alfadoc_bridge::textcell;
-use alfadoc_model::{Maix, Value};
+use alfadoc_model::{DimVector, Maix, Stamp, Value};
 use egui::Align2;
 
 use super::{Cell, DataView, Range, address, effective, number};
@@ -76,6 +76,33 @@ fn label(v: &str) -> String {
     if v.is_empty() { "(plain)".to_string() } else { v.to_string() }
 }
 
+/// The table as cells: a title row, then one row per cell with its address, the values, and for
+/// two compared values the difference and the change in percent.
+pub(super) fn table_grid(key: &str, values: &[String], rows: &[CmpRow]) -> Vec<Vec<Value>> {
+    let mut title = vec![Value::Text("Cell".into())];
+    title.extend(values.iter().map(|v| Value::Text(format!("{key}={}", label(v)))));
+    if values.len() == 2 {
+        title.push(Value::Text("Difference".into()));
+        title.push(Value::Text("Change %".into()));
+    }
+    let mut out = vec![title];
+    for row in rows {
+        let mut line = vec![Value::Text(address(row.cell))];
+        line.extend(row.values.iter().cloned());
+        if values.len() == 2 {
+            match difference(&row.values[0], &row.values[1]) {
+                Some((d, p)) => {
+                    line.push(Value::Float(d));
+                    line.push(p.map_or(Value::Null, Value::Float));
+                }
+                None => line.extend([Value::Null, Value::Null]),
+            }
+        }
+        out.push(line);
+    }
+    out
+}
+
 /// The table as tab-separated text.
 fn table_text(key: &str, values: &[String], rows: &[CmpRow]) -> String {
     let mut out = String::from("cell");
@@ -114,7 +141,7 @@ impl DataView {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn compare_window(&mut self, ctx: &egui::Context, maix: &Maix, sheet: u16) {
+    pub(super) fn compare_window(&mut self, ctx: &egui::Context, maix: &mut Maix, sheet: u16, now: u64) {
         if !self.compare.open {
             return;
         }
@@ -128,6 +155,7 @@ impl DataView {
         let range = self.sel();
         let mut open = true;
         let mut copy: Option<String> = None;
+        let mut send: Option<Vec<Vec<Value>>> = None;
         egui::Window::new("Compare vectors").open(&mut open).collapsible(false).default_size([560.0, 380.0]).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             if known.is_empty() {
                 ui.label("No dimensions yet. Add one in the Dimensions menu (for example scenario = actual) and type values under it.");
@@ -169,6 +197,9 @@ impl DataView {
                 if ui.button("Copy table").clicked() {
                     copy = Some(table_text(&st.key, &chosen, &rows));
                 }
+                if ui.button("Put on a new sheet").on_hover_text("A new data sheet with this table, ready to link to a sheet, a document table or a slide").clicked() {
+                    send = Some(table_grid(&st.key, &chosen, &rows));
+                }
             });
             egui::ScrollArea::both().max_height(260.0).show(ui, |ui| {
                 egui::Grid::new("compare_grid").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
@@ -207,6 +238,22 @@ impl DataView {
         self.compare = st;
         if let Some(text) = copy {
             ctx.copy_text(text);
+        }
+        if let Some(grid) = send {
+            let id = maix.add_sheet(&format!("Compare {}", self.compare.key));
+            let by = Stamp::new(super::AUTHOR, now);
+            let none = DimVector::new();
+            for (r, line) in grid.into_iter().enumerate() {
+                for (c, v) in line.into_iter().enumerate() {
+                    if let (Ok(r), Ok(c)) = (u32::try_from(r), u16::try_from(c))
+                        && v != Value::Null
+                    {
+                        let _ = maix.set(id, r, c, &none, v, &by);
+                    }
+                }
+            }
+            self.switch_to(id);
+            self.say("The comparison is on a new sheet. Link it from the Links tab.");
         }
     }
 }
@@ -248,6 +295,17 @@ mod tests {
         assert_eq!(difference(&Value::Int(0), &Value::Int(4)), Some((4.0, None)));
         assert_eq!(difference(&Value::Text("a".into()), &Value::Int(1)), None);
         assert_eq!(difference(&Value::Null, &Value::Int(1)), None);
+    }
+
+    #[test]
+    fn the_table_becomes_cells_with_titles_and_differences() {
+        let rows = vec![CmpRow { cell: (0, 0), values: vec![Value::Int(80), Value::Int(100)] }, CmpRow { cell: (1, 0), values: vec![Value::Int(5), Value::Null] }];
+        let g = table_grid("scenario", &["actual".to_string(), "budget".to_string()], &rows);
+        assert_eq!(g[0], vec![Value::Text("Cell".into()), Value::Text("scenario=actual".into()), Value::Text("scenario=budget".into()), Value::Text("Difference".into()), Value::Text("Change %".into())]);
+        assert_eq!(g[1], vec![Value::Text("A1".into()), Value::Int(80), Value::Int(100), Value::Float(20.0), Value::Float(25.0)]);
+        assert_eq!(g[2][3], Value::Null);
+        let three = table_grid("scenario", &["a".to_string(), "b".to_string(), "c".to_string()], &[]);
+        assert_eq!(three[0].len(), 4);
     }
 
     #[test]

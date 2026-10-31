@@ -80,7 +80,7 @@ The **Data** tab shows the shared store as a grid with GridCraft's limits (1,048
 - **Filters** (Data ▸ Create a filter, Ctrl+Shift+L): put a filter on the selection (the first row holds the titles) and each title gets a drop-down with a search box, tick boxes with counts, and sort A→Z / Z→A. Filtered-out rows use the sheet's hidden rows, so they save and undo with it. Inserting or deleting rows or columns removes the filter and shows its rows again.
 - **Fill handle:** drag the small square at the corner of the selection down or right. Two or more numbers or dates continue as a series (1, 2 → 3, 4, 5); anything else repeats, formulas move their relative references and styles are copied.
 - **Paste special…** (Edit ▸ Paste special): everything, values, formulas or formatting only, skip blanks, and transpose.
-- **Compare vectors** (Data menu): the selected cells under two or more values of one dimension side by side (actual, budget), with the difference and the change in percent for two; Copy table gives tab-separated text.
+- **Compare vectors** (Data menu): the selected cells under two or more values of one dimension side by side (actual, budget), with the difference and the change in percent for two; Copy table gives tab-separated text, and **Put on a new sheet** writes the table to a new data sheet that you can link to a sheet, a document table or a slide.
 - Not there yet: merged cells, conditional formatting, data validation, comments, grouping, double-click on the fill handle to fill as far as the neighbouring column goes.
 
 ### File end (an Excel, Word or PowerPoint file on disk)
