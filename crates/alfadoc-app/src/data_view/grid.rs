@@ -8,7 +8,7 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, CursorIcon, FontId, Key, Painter, Pos2, Rect, Sense, Stroke, Vec2};
 
 use super::axis::{Frame, Lines, scroll_to_show};
-use super::{Change, DataView, Drag, HEADER_H, HEADER_W, Hit, MIN_COLS, MIN_ROWS, Palette, cell_count, column_name, numfmt, put_input, whole_cols, whole_rows};
+use super::{Cell, Change, DataView, Drag, HEADER_H, HEADER_W, Hit, MIN_COLS, MIN_ROWS, Palette, Range, cell_count, column_name, numfmt, put_input, whole_cols, whole_rows};
 
 /// Width of the scroll bars.
 const SB: f32 = 12.0;
@@ -69,6 +69,24 @@ fn paint_cell(p: &Painter, pal: &Palette, zoom: f32, rc: Rect, value: Option<&Va
     if st.bold {
         clipped.galley(Pos2::new(x + 0.7 * zoom, y), galley, color);
     }
+}
+
+/// The drop-down button of a filtered title cell.
+fn arrow_rect(rc: Rect) -> Rect {
+    let s = (rc.height() - 4.0).clamp(8.0, 20.0).min((rc.width() - 2.0).max(8.0));
+    Rect::from_min_size(Pos2::new(rc.max.x - s - 2.0, rc.center().y - s / 2.0), Vec2::splat(s))
+}
+
+/// What dragging the fill handle from `src` to the cell under the pointer would fill: down when the
+/// pointer went at least as far down as to the right, otherwise right. `None` inside the selection
+/// or above and to the left of it.
+pub(super) fn fill_target_of(src: Range, hover: Cell) -> Option<(bool, Range)> {
+    let down_by = i64::from(hover.0) - i64::from(src.2);
+    let right_by = i64::from(hover.1) - i64::from(src.3);
+    if down_by <= 0 && right_by <= 0 {
+        return None;
+    }
+    if down_by >= right_by { Some((true, (src.2 + 1, src.1, hover.0, src.3))) } else { Some((false, (src.0, src.3 + 1, src.2, hover.1))) }
 }
 
 /// A scroll bar along one axis. `scroll` is the offset of the scrolling part; `frozen` the length
@@ -208,6 +226,26 @@ impl DataView {
             None
         };
 
+        let fview = self.filter_view(sheet);
+        let arrow_hit = |p: Pos2| -> Option<u16> {
+            let (range, _) = fview.as_ref()?;
+            let Some(Hit::Cell((r, c))) = hit_at(p) else { return None };
+            (r == range.0 && (range.1..=range.3).contains(&c) && arrow_rect(cell_rect(r, c)).contains(p)).then_some(c)
+        };
+        // The fill handle: the small square at the corner of the selection, when that corner is in view.
+        let fill_handle: Option<Rect> = {
+            let s = self.sel();
+            let (rows_ok, cols_ok) = (rf.len_of(s.2) > 0.0 && cf.len_of(u32::from(s.3)) > 0.0, !whole_cols(s) && !whole_rows(s));
+            let corner = cell_rect(s.2, s.3).max;
+            let in_view = corner.x <= body.max.x + 0.5
+                && corner.y <= body.max.y + 0.5
+                && (s.2 < fr || corner.y > rf.scroll_start() + 2.0)
+                && (u32::from(s.3) < fc || corner.x > cf.scroll_start() + 2.0)
+                && corner.x > body.min.x
+                && corner.y > body.min.y;
+            (rows_ok && cols_ok && in_view && self.edit.is_none()).then(|| Rect::from_center_size(corner, Vec2::splat((7.0 * zoom).clamp(6.0, 11.0))))
+        };
+
         // ---- pointer
         let (pressed, down, ptr, shift) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos(), i.modifiers.shift));
         let editing = self.edit.as_ref().map(|e| cell_rect(e.cell.0, e.cell.1));
@@ -218,9 +256,19 @@ impl DataView {
         {
             ui.ctx().set_cursor_icon(if cols { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical });
         }
+        if let Some(p) = ui.input(|i| i.pointer.hover_pos())
+            && (matches!(self.drag, Some(Drag::Fill { .. })) || (self.drag.is_none() && fill_handle.is_some_and(|h| h.expand(3.0).contains(p))))
+        {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
         if pressed && response.hovered() && let Some(p) = ptr && editing.is_none_or(|e| !e.contains(p)) {
             self.addr = None;
-            if let Some((cols, idx)) = edge_at(p) {
+            if fill_handle.is_some_and(|h| h.expand(3.0).contains(p)) {
+                self.drag = Some(Drag::Fill { src: self.sel() });
+                self.fill_target = None;
+            } else if let Some(col) = arrow_hit(p) {
+                self.open_filter_popup(maix, sheet, col);
+            } else if let Some((cols, idx)) = edge_at(p) {
                 let sel = self.sel();
                 let (first, last) = if cols {
                     if whole_cols(sel) && (u32::from(sel.1)..=u32::from(sel.3)).contains(&idx) { (u32::from(sel.1), u32::from(sel.3)) } else { (idx, idx) }
@@ -272,9 +320,14 @@ impl DataView {
         if down && let Some(p) = ptr {
             let mut scroll_by = Vec2::ZERO;
             match &self.drag {
-                Some(Drag::Select) => {
+                Some(Drag::Select | Drag::Fill { .. }) => {
                     let q = Pos2::new(p.x.clamp(body.min.x, body.max.x - 1.0), p.y.clamp(body.min.y, body.max.y - 1.0));
-                    self.focus = (rf.index_at(q.y, rows_ext), col_at(q.x));
+                    let hover = (rf.index_at(q.y, rows_ext), col_at(q.x));
+                    if let Some(Drag::Fill { src }) = &self.drag {
+                        self.fill_target = fill_target_of(*src, hover);
+                    } else {
+                        self.focus = hover;
+                    }
                     scroll_by = Vec2::new(
                         if p.x < body.min.x { p.x - body.min.x } else if p.x > body.max.x { p.x - body.max.x } else { 0.0 },
                         if p.y < body.min.y { p.y - body.min.y } else if p.y > body.max.y { p.y - body.max.y } else { 0.0 },
@@ -306,11 +359,22 @@ impl DataView {
                 ui.ctx().request_repaint();
             }
         } else if !down && let Some(drag) = self.drag.take() {
-            if let Drag::Resize { before, .. } = drag
-                && let Ok(sh) = maix.sheet(sheet)
-                && sh.format != *before
-            {
-                self.steps.push(super::Step::Format { sheet, before, after: Box::new(sh.format.clone()) });
+            match drag {
+                Drag::Resize { before, .. } => {
+                    if let Ok(sh) = maix.sheet(sheet)
+                        && sh.format != *before
+                    {
+                        self.steps.push(super::Step::Format { sheet, before, after: Box::new(sh.format.clone()) });
+                    }
+                }
+                Drag::Fill { src } => {
+                    if let Some((below, target)) = self.fill_target.take() {
+                        self.fill_range(maix, sheet, src, target, below, now, batch);
+                        self.anchor = (src.0, src.1);
+                        self.focus = (src.2.max(target.2), src.3.max(target.3));
+                    }
+                }
+                Drag::Select | Drag::Header(_) => {}
             }
         }
         if response.secondary_clicked()
@@ -418,6 +482,17 @@ impl DataView {
                         if value.is_some() || style.is_some() {
                             paint_cell(&p, &pal, zoom, Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)), value, style);
                         }
+                        if let Some((range, active)) = &fview
+                            && r == range.0
+                            && (range.1..=range.3).contains(&col)
+                            && w > 26.0 * zoom
+                        {
+                            let ar = arrow_rect(Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)));
+                            p.rect_filled(ar, 2.0, if active.contains(&col) { pal.select_line.gamma_multiply(0.35) } else { pal.header });
+                            p.rect_stroke(ar, 2.0, Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
+                            let (c, k) = (ar.center(), ar.width() * 0.22);
+                            p.add(egui::Shape::convex_polygon(vec![Pos2::new(c.x - k, c.y - k * 0.5), Pos2::new(c.x + k, c.y - k * 0.5), Pos2::new(c.x, c.y + k * 0.8)], pal.header_text, Stroke::NONE));
+                        }
                     }
                 }
                 let sel_rect = Rect::from_min_max(cell_rect(sel.0, sel.1).min, cell_rect(sel.2, sel.3).max);
@@ -426,6 +501,19 @@ impl DataView {
                     p.rect_stroke(sel_rect, 0.0, Stroke::new(1.5, pal.select_line), egui::StrokeKind::Inside);
                 }
                 p.rect_stroke(cell_rect(self.focus.0, self.focus.1), 0.0, Stroke::new(2.0, pal.select_line), egui::StrokeKind::Inside);
+            }
+        }
+
+        // ---- the fill handle and, while it is dragged, where the fill would reach
+        {
+            let p = ui.painter_at(body);
+            if let (Some((_, target)), Some(Drag::Fill { src })) = (&self.fill_target, &self.drag) {
+                let area = Rect::from_min_max(cell_rect(src.0.min(target.0), src.1.min(target.1)).min, cell_rect(src.2.max(target.2), src.3.max(target.3)).max);
+                p.rect_stroke(area, 0.0, Stroke::new(1.5, pal.select_line), egui::StrokeKind::Outside);
+            }
+            if let Some(h) = fill_handle {
+                p.rect_filled(h.expand(1.0), 0.0, pal.cell);
+                p.rect_filled(h, 0.0, pal.select_line);
             }
         }
 

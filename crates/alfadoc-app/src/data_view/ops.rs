@@ -25,6 +25,64 @@ pub(super) enum PasteKind {
     Formats,
 }
 
+/// Everything the Paste special dialog chooses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PasteOpts {
+    pub kind: PasteKind,
+    /// Rows become columns and columns rows.
+    pub transpose: bool,
+    /// Blank source cells leave the cells under them alone.
+    pub skip_blanks: bool,
+}
+
+impl PasteOpts {
+    pub(super) fn plain(kind: PasteKind) -> PasteOpts {
+        PasteOpts { kind, transpose: false, skip_blanks: false }
+    }
+}
+
+/// The values that continue an arithmetic series: two or more numbers (or dates) with one step
+/// between neighbours. `None` when the cells are not such a series (they are then copied in turn).
+pub(super) fn series_next(values: &[Value], count: usize) -> Option<Vec<Value>> {
+    if values.len() < 2 {
+        return None;
+    }
+    let all_int = values.iter().all(|v| matches!(v, Value::Int(_)));
+    let all_date = values.iter().all(|v| matches!(v, Value::Date(_)));
+    let nums: Vec<f64> = values
+        .iter()
+        .map(|v| match v {
+            Value::Int(i) => Some(*i as f64),
+            Value::Float(f) => Some(*f),
+            Value::Date(d) => Some(*d as f64),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    if !all_date && values.iter().any(|v| matches!(v, Value::Date(_))) {
+        return None;
+    }
+    let step = nums[1] - nums[0];
+    let tolerance = 1e-9 * nums.iter().fold(1.0_f64, |m, x| m.max(x.abs()));
+    if nums.windows(2).any(|w| ((w[1] - w[0]) - step).abs() > tolerance) {
+        return None;
+    }
+    let last = nums[nums.len() - 1];
+    Some(
+        (1..=count)
+            .map(|i| {
+                let x = last + step * i as f64;
+                if all_int {
+                    Value::Int(x.round() as i64)
+                } else if all_date {
+                    Value::Date(x.round() as i64)
+                } else {
+                    Value::Float(x)
+                }
+            })
+            .collect(),
+    )
+}
+
 fn content_at(maix: &Maix, sheet: u16, r: u32, c: u16) -> Content {
     let dims = &maix.active_dims;
     match maix.formula(sheet, r, c, dims) {
@@ -136,11 +194,16 @@ impl DataView {
 
     /// Pastes the cells copied inside the app at the selection's top-left corner.
     pub(super) fn paste_clip(&mut self, maix: &mut Maix, sheet: u16, clip: &Clip, kind: PasteKind, now: u64, batch: &mut Vec<Change>) {
+        self.paste_clip_with(maix, sheet, clip, PasteOpts::plain(kind), now, batch);
+    }
+
+    /// [`paste_clip`](Self::paste_clip) with the options of the Paste special dialog.
+    pub(super) fn paste_clip_with(&mut self, maix: &mut Maix, sheet: u16, clip: &Clip, opts: PasteOpts, now: u64, batch: &mut Vec<Change>) {
+        let kind = opts.kind;
         let sel = self.sel();
         let (top, left) = (sel.0, sel.1);
         let rows = clip.range.2 - clip.range.0 + 1;
         let cols = u32::from(clip.range.3 - clip.range.1) + 1;
-        let (dr, dc) = (i64::from(top) - i64::from(clip.range.0), i64::from(left) - i64::from(clip.range.1));
         if clip.cut && kind == PasteKind::All {
             clear(maix, clip.sheet, clip.range, now, batch);
             let range = clip.range;
@@ -148,20 +211,32 @@ impl DataView {
                 f.clear_range(range);
             });
         }
-        let mut targets: Vec<(u32, u16, usize)> = vec![];
+        // (row, column, index in the clip, rows moved, columns moved)
+        let mut targets: Vec<(u32, u16, usize, i64, i64)> = vec![];
         for i in 0..rows {
             for j in 0..cols {
-                let (r, c) = (top.saturating_add(i), u32::from(left) + j);
+                let (ti, tj) = if opts.transpose { (j, i) } else { (i, j) };
+                let (r, c) = (top.saturating_add(ti), u32::from(left) + tj);
                 if r < MAX_ROWS && c < u32::from(MAX_COLS) {
-                    targets.push((r, u16::try_from(c).unwrap_or(0), (i * cols + j) as usize));
+                    let k = (i * cols + j) as usize;
+                    let blank = match (kind, clip.contents.get(k)) {
+                        (PasteKind::Values, _) => clip.values.get(k).is_none_or(|v| *v == Value::Null),
+                        (_, Some(Content::Value(Value::Null)) | None) => true,
+                        _ => false,
+                    };
+                    if opts.skip_blanks && blank {
+                        continue;
+                    }
+                    let (dr, dc) = (i64::from(r) - i64::from(clip.range.0 + i), i64::from(c) - i64::from(clip.range.1) - i64::from(j));
+                    targets.push((r, u16::try_from(c).unwrap_or(0), k, dr, dc));
                 }
             }
         }
         if kind != PasteKind::Formats {
-            for (r, c, k) in &targets {
+            for (r, c, k, dr, dc) in &targets {
                 let content = match (kind, clip.contents.get(*k)) {
                     (PasteKind::Values, _) => Content::Value(clip.values.get(*k).cloned().unwrap_or(Value::Null)),
-                    (_, Some(Content::Formula(f))) => Content::Formula(translate_formula(f, dr, dc)),
+                    (_, Some(Content::Formula(f))) => Content::Formula(translate_formula(f, *dr, *dc)),
                     (_, Some(other)) => other.clone(),
                     (_, None) => Content::Value(Value::Null),
                 };
@@ -171,18 +246,27 @@ impl DataView {
         }
         if kind == PasteKind::All || kind == PasteKind::Formats {
             self.edit_format(maix, sheet, |f| {
-                for (r, c, k) in &targets {
+                for (r, c, k, _, _) in &targets {
                     if let Some(style) = clip.styles.get(*k) {
                         f.set_cell(*r, *c, style);
                     }
                 }
             });
         }
-        let (bottom, right) = (top.saturating_add(rows - 1).min(MAX_ROWS - 1), u16::try_from((u32::from(left) + cols - 1).min(u32::from(MAX_COLS) - 1)).unwrap_or(0));
+        let (h, w) = if opts.transpose { (cols, rows) } else { (rows, cols) };
+        let (bottom, right) = (top.saturating_add(h - 1).min(MAX_ROWS - 1), u16::try_from((u32::from(left) + w - 1).min(u32::from(MAX_COLS) - 1)).unwrap_or(0));
         self.anchor = (top, left);
         self.focus = (bottom, right);
         if clip.cut && kind == PasteKind::All {
             self.clip = None;
+        }
+    }
+
+    /// Paste special with the dialog's options (our own clipboard only).
+    pub(super) fn paste_with(&mut self, maix: &mut Maix, sheet: u16, opts: PasteOpts, now: u64, batch: &mut Vec<Change>) {
+        match self.clip.clone() {
+            Some(clip) => self.paste_clip_with(maix, sheet, &clip, opts, now, batch),
+            None => self.say("Nothing copied in this window. Copy cells here first."),
         }
     }
 
@@ -204,6 +288,10 @@ impl DataView {
 
     /// Runs a change of the sheet's shape and keeps a step that undoes it.
     fn structural<T>(&mut self, maix: &mut Maix, sheet: u16, shift: Option<(Axis, Shift)>, op: impl FnOnce(&mut Maix) -> alfadoc_model::Result<T>) -> Option<T> {
+        if shift.is_some() && self.has_filter(sheet) {
+            // Row numbers are about to move: show the filtered rows again and forget the filter.
+            self.remove_filter(maix, sheet);
+        }
         let before = maix.sheet(sheet).ok()?.clone();
         match op(maix) {
             Ok(out) => {
@@ -397,10 +485,15 @@ impl DataView {
         if range.0 >= range.2 {
             return;
         }
-        let dims = maix.active_dims.clone();
-        if let Some(moved) = self.structural(maix, sheet, None, |m| m.sort_rows(sheet, range, key, ascending, &dims)) {
+        if let Some(moved) = self.sort_rows_in(maix, sheet, range, key, ascending) {
             self.say(if moved == 0 { "Already in order.".to_string() } else { format!("Sorted {} rows.", range.2 - range.0 + 1) });
         }
+    }
+
+    /// Sorts the rows of `range` by the column `key`; returns how many rows moved.
+    pub(super) fn sort_rows_in(&mut self, maix: &mut Maix, sheet: u16, range: Range, key: u16, ascending: bool) -> Option<usize> {
+        let dims = maix.active_dims.clone();
+        self.structural(maix, sheet, None, |m| m.sort_rows(sheet, range, key, ascending, &dims))
     }
 
     /// Ctrl+D (`down`) and Ctrl+R: copies the first row (column) of the selection over the rest,
@@ -441,6 +534,56 @@ impl DataView {
                 let spot = Spot { sheet, cell: (r, c), dims: maix.active_dims.clone() };
                 write(maix, &spot, c2, now, batch);
                 styled.push((r, c, style.clone()));
+            }
+        }
+        self.edit_format(maix, sheet, |f| {
+            for (r, c, s) in &styled {
+                f.set_cell(*r, *c, s);
+            }
+        });
+    }
+
+    /// The fill handle: continues `src` over `target`, which lies right below it (`down`) or right
+    /// of it. Number series (1, 2 → 3, 4…) continue; anything else repeats, formulas moving their
+    /// relative references, and styles are copied along.
+    pub(super) fn fill_range(&mut self, maix: &mut Maix, sheet: u16, src: Range, target: Range, down: bool, now: u64, batch: &mut Vec<Change>) {
+        if cell_count(target) > MAX_BATCH || cell_count(src) > MAX_BATCH {
+            self.say("That is too much to fill at once.");
+            return;
+        }
+        // Along the fill direction: the source lines and the new lines; across: the other axis.
+        let (s_from, s_to, t_from, t_to, a_from, a_to) = if down {
+            (src.0, src.2, target.0, target.2, u32::from(src.1), u32::from(src.3))
+        } else {
+            (u32::from(src.1), u32::from(src.3), u32::from(target.1), u32::from(target.3), src.0, src.2)
+        };
+        let at = |line: u32, across: u32| -> Option<(u32, u16)> {
+            if down { Some((line, u16::try_from(across).ok()?)) } else { Some((across, u16::try_from(line).ok()?)) }
+        };
+        let n = (s_to - s_from + 1) as usize;
+        let count = (t_to - t_from + 1) as usize;
+        let mut styled: Vec<(u32, u16, CellStyle)> = vec![];
+        for across in a_from..=a_to {
+            let sources: Vec<(u32, u16)> = (s_from..=s_to).filter_map(|l| at(l, across)).collect();
+            if sources.len() != n {
+                continue;
+            }
+            let contents: Vec<Content> = sources.iter().map(|(r, c)| content_at(maix, sheet, *r, *c)).collect();
+            let values: Vec<Value> = contents.iter().map(|c| if let Content::Value(v) = c { v.clone() } else { Value::Null }).collect();
+            let all_values = contents.iter().all(|c| matches!(c, Content::Value(_)));
+            let series = if all_values { series_next(&values, count) } else { None };
+            for k in 0..count {
+                let Some((r, c)) = at(t_from + u32::try_from(k).unwrap_or(0), across) else { continue };
+                let which = k % n;
+                let (sr, sc) = sources[which];
+                let content = match (&series, &contents[which]) {
+                    (Some(vals), _) => Content::Value(vals[k].clone()),
+                    (None, Content::Formula(f)) => Content::Formula(translate_formula(f, i64::from(r) - i64::from(sr), i64::from(c) - i64::from(sc))),
+                    (None, other) => other.clone(),
+                };
+                let spot = Spot { sheet, cell: (r, c), dims: maix.active_dims.clone() };
+                write(maix, &spot, content, now, batch);
+                styled.push((r, c, maix.sheet(sheet).map(|s| s.format.style_at(sr, sc)).unwrap_or_default()));
             }
         }
         self.edit_format(maix, sheet, |f| {

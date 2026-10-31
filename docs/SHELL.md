@@ -76,7 +76,12 @@ The **Data** tab shows the shared store as a grid with GridCraft's limits (1,048
 - **Rows and columns:** insert and delete (Ctrl++ / Ctrl+-); formulas that point at moved cells are rewritten (`=A3` becomes `=A5`, a deleted target becomes `#REF!`) and links that cover the range follow it. Sort A→Z / Z→A / range with a key column; formulas travel with their rows. Fill down / right (Ctrl+D / Ctrl+R) moves relative references.
 - **Clipboard:** inside the window copy/cut/paste keeps formulas (relative references move) and formatting; Paste special offers values, formulas or formats only. Text from other programs pastes as tab-separated values. The Paste menu entry only sees the in-window clipboard: use Ctrl+V for text from elsewhere.
 - **Undo** covers values, formats, sizes, hiding, freezing, inserts, deletes and sorts. Deleting a sheet cannot be undone and asks first. Undoing an insert or delete moves linked ranges back by the opposite shift, which is not an exact inverse when the range had shrunk.
-- Not there yet: find/replace, filters, merged cells, conditional formatting, data validation, comments, grouping, the fill-handle drag.
+- **Find and replace** (Ctrl+F or Ctrl+H, Edit menu): next/previous, replace, replace all, match case, whole cell, look in formulas, selection only. Computed values are not replaced; search formulas to change a formula.
+- **Filters** (Data ▸ Create a filter, Ctrl+Shift+L): put a filter on the selection (the first row holds the titles) and each title gets a drop-down with a search box, tick boxes with counts, and sort A→Z / Z→A. Filtered-out rows use the sheet's hidden rows, so they save and undo with it. Inserting or deleting rows or columns removes the filter and shows its rows again.
+- **Fill handle:** drag the small square at the corner of the selection down or right. Two or more numbers or dates continue as a series (1, 2 → 3, 4, 5); anything else repeats, formulas move their relative references and styles are copied.
+- **Paste special…** (Edit ▸ Paste special): everything, values, formulas or formatting only, skip blanks, and transpose.
+- **Compare vectors** (Data menu): the selected cells under two or more values of one dimension side by side (actual, budget), with the difference and the change in percent for two; Copy table gives tab-separated text.
+- Not there yet: merged cells, conditional formatting, data validation, comments, grouping, double-click on the fill handle to fill as far as the neighbouring column goes.
 
 ### File end (an Excel, Word or PowerPoint file on disk)
 

@@ -4,7 +4,7 @@ use alfadoc_model::{Axis, CellStyle, HAlign, Maix};
 use egui::{Align2, Key, RichText, Sense, Vec2};
 
 use super::grid::rgb;
-use super::ops::{PasteKind, Toggle};
+use super::ops::{PasteKind, PasteOpts, Toggle};
 use super::{Change, DataView, Hit, MAX_ZOOM, MIN_ZOOM, cell_count, clear, column_name, numfmt, parse_address, value_at, whole_cols, whole_rows};
 use alfadoc_model::format::{MAX_COLS, MAX_COL_W, MAX_ROWS, MAX_ROW_H, MIN_SIZE};
 
@@ -15,6 +15,7 @@ pub(super) enum Prompt {
     NumFmt(String),
     Sort { key: u16, ascending: bool, header: bool },
     DeleteSheet(u16),
+    PasteSpecial(PasteOpts),
 }
 
 /// Sizes offered in the toolbar, in points.
@@ -109,6 +110,9 @@ impl DataView {
         if item(ui, "Go to…", "Ctrl+G", true) {
             self.prompt = Some(Prompt::GoTo(String::new()));
         }
+        if item(ui, "Find and replace…", "Ctrl+F", true) {
+            self.open_find();
+        }
     }
 
     fn clipboard_items(&mut self, ui: &mut egui::Ui, maix: &mut Maix, sheet: u16, now: u64, batch: &mut Vec<Change>) {
@@ -130,6 +134,10 @@ impl DataView {
             }
             if item(ui, "Formatting only", "", self.clip.is_some()) {
                 self.paste_special(maix, sheet, PasteKind::Formats, now, batch);
+            }
+            ui.separator();
+            if item(ui, "Paste special…", "", self.clip.is_some()) {
+                self.prompt = Some(Prompt::PasteSpecial(PasteOpts::plain(PasteKind::All)));
             }
         });
     }
@@ -289,6 +297,14 @@ impl DataView {
         }
         if item(ui, "Sort range…", "", true) {
             self.prompt = Some(Prompt::Sort { key: self.focus.1, ascending: true, header: false });
+        }
+        ui.separator();
+        let filtered = self.has_filter(sheet);
+        if item(ui, if filtered { "Remove filter" } else { "Create a filter" }, "Ctrl+Shift+L", true) {
+            self.toggle_filter(maix, sheet);
+        }
+        if item(ui, "Compare vectors…", "", true) {
+            self.open_compare(maix);
         }
     }
 
@@ -560,7 +576,7 @@ impl DataView {
     // ---- dialogs
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn prompt_window(&mut self, ctx: &egui::Context, maix: &mut Maix, sheet: u16) {
+    pub(super) fn prompt_window(&mut self, ctx: &egui::Context, maix: &mut Maix, sheet: u16, now: u64, batch: &mut Vec<Change>) {
         let Some(mut prompt) = self.prompt.take() else { return };
         let title = match &prompt {
             Prompt::GoTo(_) => "Go to",
@@ -569,6 +585,7 @@ impl DataView {
             Prompt::NumFmt(_) => "Number format",
             Prompt::Sort { .. } => "Sort range",
             Prompt::DeleteSheet(_) => "Delete sheet",
+            Prompt::PasteSpecial(_) => "Paste special",
         };
         let sel = self.sel();
         let focus_value = value_at(maix, sheet, self.focus.0, self.focus.1);
@@ -621,6 +638,16 @@ impl DataView {
                     ui.checkbox(header, "The first row holds titles");
                     ui.weak("With one cell selected the whole used area is sorted. Formulas stay with their rows.");
                 }
+                Prompt::PasteSpecial(opts) => {
+                    ui.label("Paste what was copied in this window:");
+                    ui.radio_value(&mut opts.kind, PasteKind::All, "Everything (values, formulas, formatting)");
+                    ui.radio_value(&mut opts.kind, PasteKind::Values, "Values only");
+                    ui.radio_value(&mut opts.kind, PasteKind::Formulas, "Formulas only");
+                    ui.radio_value(&mut opts.kind, PasteKind::Formats, "Formatting only");
+                    ui.separator();
+                    ui.checkbox(&mut opts.skip_blanks, "Skip blanks (empty copied cells keep what is there)");
+                    ui.checkbox(&mut opts.transpose, "Transpose (rows become columns)");
+                }
                 Prompt::DeleteSheet(_) => {
                     ui.label(format!("Delete the sheet “{sheet_name}” and everything on it?"));
                     ui.weak("Links that point at it stop working. This cannot be undone.");
@@ -668,6 +695,7 @@ impl DataView {
             Prompt::Sort { key, ascending, header } => {
                 self.sort_selection(maix, sheet, ascending, Some(key), Some(header));
             }
+            Prompt::PasteSpecial(opts) => self.paste_with(maix, sheet, opts, now, batch),
             Prompt::DeleteSheet(id) => {
                 if maix.delete_sheet(id) {
                     if let Some(first) = maix.sheets.first().map(|s| s.id) {

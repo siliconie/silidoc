@@ -20,6 +20,9 @@
 //! `numfmt.rs` number formats.
 
 mod axis;
+mod compare;
+mod filter;
+mod find;
 mod grid;
 mod menu;
 mod numfmt;
@@ -103,6 +106,8 @@ enum Drag {
     /// Selecting whole columns (`true`) or rows by dragging over their headers.
     Header(bool),
     /// Resizing the lines `first..=last` of one axis by dragging a header edge.
+    /// Dragging the fill handle from the selection `src` (always a normalised range).
+    Fill { src: Range },
     Resize { cols: bool, first: u32, last: u32, start: f32, from: f32, before: Box<SheetFormat> },
 }
 
@@ -163,6 +168,12 @@ pub struct DataView {
     /// What the last right-click landed on.
     ctx_hit: Option<Hit>,
     clip: Option<Clip>,
+    find: find::FindState,
+    filters: std::collections::HashMap<u16, filter::Filter>,
+    filter_popup: Option<filter::Popup>,
+    compare: compare::CompareState,
+    /// While the fill handle is dragged: (down, the cells that would be filled).
+    fill_target: Option<(bool, Range)>,
     prompt: Option<menu::Prompt>,
     gridlines: bool,
     /// A short message shown in the footer, with the time it was first shown (NaN: not yet).
@@ -203,6 +214,11 @@ impl Default for DataView {
             drag: None,
             ctx_hit: None,
             clip: None,
+            find: find::FindState::default(),
+            filters: std::collections::HashMap::new(),
+            filter_popup: None,
+            compare: compare::CompareState::default(),
+            fill_target: None,
             prompt: None,
             gridlines: true,
             note: None,
@@ -642,7 +658,10 @@ impl DataView {
         let grid_height = (ui.available_height() - footer).max(80.0);
         self.grid(ui, maix, sheet, now_ms, grid_height, &mut batch);
         self.footer(ui, maix, sheet);
-        self.prompt_window(ui.ctx(), maix, sheet);
+        self.prompt_window(ui.ctx(), maix, sheet, now_ms, &mut batch);
+        self.find_window(ui.ctx(), maix, sheet, now_ms, &mut batch);
+        self.filter_window(ui.ctx(), maix, sheet);
+        self.compare_window(ui.ctx(), maix, sheet);
         let extra = std::mem::take(&mut self.steps);
         let mut changed = maix.sheets.len() != sheets_before;
         if !batch.is_empty() || !extra.is_empty() || self.needs_calc || maix.history.len() != history_before {
@@ -832,6 +851,8 @@ impl DataView {
                     Key::Plus | Key::Equals if cmd => self.insert_for_selection(maix, sheet, now),
                     Key::Minus if cmd => self.delete_for_selection(maix, sheet, now),
                     Key::G if cmd => self.prompt = Some(menu::Prompt::GoTo(String::new())),
+                    Key::F | Key::H if cmd => self.open_find(),
+                    Key::L if cmd && extend => self.toggle_filter(maix, sheet),
                     _ => {}
                 }
             }
@@ -1334,5 +1355,110 @@ mod tests {
         let step = v.steps.pop().unwrap();
         v.run_step(&mut m, &step, true, 2);
         assert_eq!(shown(&m, s, 1, 0), "b");
+    }
+
+    #[test]
+    fn number_series_continue_and_anything_else_is_copied() {
+        use ops::series_next;
+        let ints = |v: &[i64]| v.iter().map(|i| Value::Int(*i)).collect::<Vec<_>>();
+        assert_eq!(series_next(&ints(&[1, 2]), 3), Some(ints(&[3, 4, 5])));
+        assert_eq!(series_next(&ints(&[2, 4, 6]), 1), Some(ints(&[8])));
+        assert_eq!(series_next(&ints(&[10, 5]), 2), Some(ints(&[0, -5])));
+        assert_eq!(series_next(&ints(&[1, 3, 4]), 2), None);
+        assert_eq!(series_next(&ints(&[7]), 2), None);
+        assert_eq!(series_next(&[Value::Text("a".into()), Value::Text("b".into())], 2), None);
+        assert_eq!(series_next(&[Value::Int(1), Value::Float(1.5)], 1), Some(vec![Value::Float(2.0)]));
+        let day = 86_400_000;
+        assert_eq!(series_next(&[Value::Date(0), Value::Date(day)], 1), Some(vec![Value::Date(2 * day)]));
+        assert_eq!(series_next(&[Value::Date(0), Value::Int(1)], 1), None);
+    }
+
+    #[test]
+    fn the_fill_handle_continues_series_repeats_the_rest_and_moves_formulas() {
+        let (mut m, s) = store();
+        let mut batch = vec![];
+        for (cell, text) in [((0, 0), "1"), ((1, 0), "2"), ((0, 1), "x"), ((1, 1), "y"), ((0, 2), "=A1*2")] {
+            put_input(&mut m, s, cell, text, 1, &mut batch);
+        }
+        let mut v = DataView::default();
+        v.fill_range(&mut m, s, (0, 0, 1, 2), (2, 0, 4, 2), true, 2, &mut batch);
+        m.recalc(&Stamp::new("t", 3));
+        assert_eq!((shown(&m, s, 2, 0), shown(&m, s, 4, 0)), ("3".to_string(), "5".to_string()));
+        assert_eq!((shown(&m, s, 2, 1), shown(&m, s, 3, 1), shown(&m, s, 4, 1)), ("x".to_string(), "y".to_string(), "x".to_string()));
+        assert_eq!(input_text(&m, s, 0, 2), "=A1*2");
+        assert_eq!(input_text(&m, s, 3, 2), "");
+        // Rightwards: a row of 10, 20 goes on with 30, 40.
+        put_input(&mut m, s, (8, 0), "10", 4, &mut batch);
+        put_input(&mut m, s, (8, 1), "20", 4, &mut batch);
+        v.fill_range(&mut m, s, (8, 0, 8, 1), (8, 2, 8, 3), false, 5, &mut batch);
+        assert_eq!((shown(&m, s, 8, 2), shown(&m, s, 8, 3)), ("30".to_string(), "40".to_string()));
+        // A formula in a single cell moves its references.
+        put_input(&mut m, s, (10, 0), "=A1+1", 6, &mut batch);
+        v.fill_range(&mut m, s, (10, 0, 10, 0), (11, 0, 12, 0), true, 7, &mut batch);
+        assert_eq!((input_text(&m, s, 11, 0), input_text(&m, s, 12, 0)), ("=A2+1".to_string(), "=A3+1".to_string()));
+    }
+
+    #[test]
+    fn dragging_the_handle_fills_down_or_right_never_back() {
+        use grid::fill_target_of;
+        let src = (2, 2, 3, 3);
+        assert_eq!(fill_target_of(src, (6, 3)), Some((true, (4, 2, 6, 3))));
+        assert_eq!(fill_target_of(src, (3, 7)), Some((false, (2, 4, 3, 7))));
+        assert_eq!(fill_target_of(src, (5, 5)), Some((true, (4, 2, 5, 3))));
+        assert_eq!(fill_target_of(src, (3, 3)), None);
+        assert_eq!(fill_target_of(src, (0, 0)), None);
+    }
+
+    #[test]
+    fn paste_special_can_transpose_and_skip_blanks() {
+        let (mut m, s) = store();
+        let mut batch = vec![];
+        paste(&mut m, s, (0, 0), (0, 0, 0, 0), "1\t2\n3\t4\n", 1, &mut batch);
+        let mut v = DataView::default();
+        let ctx = egui::Context::default();
+        v.anchor = (0, 0);
+        v.focus = (1, 1);
+        v.copy(&ctx, &m, s, false);
+        let clip = v.clip.clone().unwrap();
+        v.anchor = (0, 3);
+        v.focus = (0, 3);
+        let opts = ops::PasteOpts { kind: ops::PasteKind::All, transpose: true, skip_blanks: false };
+        v.paste_clip_with(&mut m, s, &clip, opts, 2, &mut batch);
+        assert_eq!((shown(&m, s, 0, 3), shown(&m, s, 0, 4), shown(&m, s, 1, 3), shown(&m, s, 1, 4)), ("1".to_string(), "3".to_string(), "2".to_string(), "4".to_string()));
+        assert_eq!(v.sel(), (0, 3, 1, 4));
+        // Blank copied cells leave what is there alone when asked.
+        put_input(&mut m, s, (5, 0), "7", 3, &mut batch);
+        put_input(&mut m, s, (9, 0), "keep", 3, &mut batch);
+        put_input(&mut m, s, (9, 1), "gone", 3, &mut batch);
+        v.anchor = (5, 0);
+        v.focus = (5, 1);
+        v.copy(&ctx, &m, s, false);
+        let clip = v.clip.clone().unwrap();
+        v.anchor = (9, 0);
+        v.focus = (9, 0);
+        v.paste_clip_with(&mut m, s, &clip, ops::PasteOpts { kind: ops::PasteKind::All, transpose: false, skip_blanks: true }, 4, &mut batch);
+        assert_eq!((shown(&m, s, 9, 0), shown(&m, s, 9, 1)), ("7".to_string(), "gone".to_string()));
+        v.anchor = (9, 0);
+        v.focus = (9, 0);
+        v.paste_clip_with(&mut m, s, &clip, ops::PasteOpts::plain(ops::PasteKind::All), 5, &mut batch);
+        assert_eq!(shown(&m, s, 9, 1), "");
+    }
+
+    #[test]
+    fn inserting_rows_drops_the_filter_and_shows_its_rows() {
+        let (mut m, s) = store();
+        let mut batch = vec![];
+        paste(&mut m, s, (0, 0), (0, 0, 0, 0), "name\nb\na\n", 1, &mut batch);
+        let mut v = DataView::default();
+        v.anchor = (0, 0);
+        v.focus = (0, 0);
+        v.toggle_filter(&mut m, s);
+        assert!(v.has_filter(s));
+        v.filters.get_mut(&s).unwrap().allowed.insert(0, ["a".to_string()].into_iter().collect());
+        v.apply_filter(&mut m, s);
+        assert_eq!(m.sheet(s).unwrap().format.layout.hidden_rows.len(), 1);
+        v.insert_lines(&mut m, s, Axis::Rows, 1, 1);
+        assert!(!v.has_filter(s));
+        assert!(m.sheet(s).unwrap().format.layout.hidden_rows.is_empty());
     }
 }
