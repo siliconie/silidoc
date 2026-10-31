@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::extras::Extras;
+
 /// Most rows and columns a maix sheet can have (the same as Excel and GridCraft).
 pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLS: u16 = 16_384;
@@ -194,6 +196,8 @@ impl CellStyle {
 #[serde(from = "FormatRepr", into = "FormatRepr")]
 pub struct SheetFormat {
     pub layout: Layout,
+    /// Merged cells, conditional formatting, validation, comments and groups.
+    pub extras: Extras,
     /// Interned styles; the id of `styles[i]` is `i + 1`.
     styles: Vec<CellStyle>,
     cells: BTreeMap<(u32, u16), u32>,
@@ -212,6 +216,8 @@ struct StyleCell {
 struct FormatRepr {
     #[serde(default)]
     layout: Layout,
+    #[serde(default, skip_serializing_if = "Extras::is_empty")]
+    extras: Extras,
     #[serde(default)]
     styles: Vec<CellStyle>,
     #[serde(default)]
@@ -229,6 +235,7 @@ impl From<FormatRepr> for SheetFormat {
         let ok = |id: u32| if id <= n { id } else { 0 };
         SheetFormat {
             layout: r.layout,
+            extras: r.extras,
             cells: r.cells.into_iter().map(|c| ((c.row, c.col), ok(c.style))).collect(),
             cols: r.cols.into_iter().map(|(k, v)| (k, ok(v))).collect(),
             rows: r.rows.into_iter().map(|(k, v)| (k, ok(v))).collect(),
@@ -241,6 +248,7 @@ impl From<SheetFormat> for FormatRepr {
     fn from(f: SheetFormat) -> Self {
         FormatRepr {
             layout: f.layout,
+            extras: f.extras,
             styles: f.styles,
             cells: f.cells.into_iter().map(|((row, col), style)| StyleCell { row, col, style }).collect(),
             cols: f.cols,
@@ -322,7 +330,7 @@ fn remap_set<K: Ord + Copy>(set: &mut BTreeSet<K>, f: impl Fn(K) -> Option<K>) {
 
 impl SheetFormat {
     pub fn is_default(&self) -> bool {
-        self.layout.is_default() && self.cells.is_empty() && self.cols.is_empty() && self.rows.is_empty()
+        self.layout.is_default() && self.extras.is_empty() && self.cells.is_empty() && self.cols.is_empty() && self.rows.is_empty()
     }
 
     /// The style with this id (`None` for the plain style).
@@ -434,6 +442,7 @@ impl SheetFormat {
 
     /// Moves what the shift moves: styles, sizes, hidden lines and the frozen pane.
     pub fn shift(&mut self, axis: Axis, op: Shift) {
+        self.extras.shift(axis, op);
         match axis {
             Axis::Rows => {
                 remap_keys(&mut self.cells, |(r, c)| op.map(r).map(|r| (r, c)));

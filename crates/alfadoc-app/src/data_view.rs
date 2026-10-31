@@ -21,6 +21,8 @@
 
 mod axis;
 mod compare;
+mod cube;
+mod extras_ui;
 mod filter;
 mod find;
 mod grid;
@@ -158,6 +160,8 @@ pub struct DataView {
     /// The "new dimension" boxes of the Dimensions menu.
     dim_key: String,
     dim_value: String,
+    /// The "new value" box of each dimension in the Dimensions menu.
+    dim_inputs: std::collections::BTreeMap<String, String>,
     /// Scroll offsets (x, y) of the scrolling part, in sheet units.
     scroll: (f64, f64),
     zoom: f32,
@@ -172,8 +176,15 @@ pub struct DataView {
     filters: std::collections::HashMap<u16, filter::Filter>,
     filter_popup: Option<filter::Popup>,
     compare: compare::CompareState,
+    cube: cube::CubeState,
     /// While the fill handle is dragged: (down, the cells that would be filled).
     fill_target: Option<(bool, Range)>,
+    dialog: Option<extras_ui::Dialog>,
+    /// The time of the frame being shown (for menu actions that write by themselves).
+    now_ms: u64,
+    /// The list-validated cell whose drop-down is open, and where it opens.
+    list_pick: Option<(Cell, egui::Pos2)>,
+    scale_cache: Option<extras_ui::ScaleCache>,
     prompt: Option<menu::Prompt>,
     gridlines: bool,
     /// A short message shown in the footer, with the time it was first shown (NaN: not yet).
@@ -207,6 +218,7 @@ impl Default for DataView {
             needs_calc: false,
             dim_key: String::new(),
             dim_value: String::new(),
+            dim_inputs: std::collections::BTreeMap::new(),
             scroll: (0.0, 0.0),
             zoom: 1.0,
             rows_ext: 0,
@@ -218,7 +230,12 @@ impl Default for DataView {
             filters: std::collections::HashMap::new(),
             filter_popup: None,
             compare: compare::CompareState::default(),
+            cube: cube::CubeState::default(),
             fill_target: None,
+            dialog: None,
+            now_ms: 0,
+            list_pick: None,
+            scale_cache: None,
             prompt: None,
             gridlines: true,
             note: None,
@@ -648,6 +665,7 @@ impl DataView {
             });
             return changed;
         };
+        self.now_ms = now_ms;
         let mut batch: Vec<Change> = vec![];
         let history_before = maix.history.len();
         let sheets_before = maix.sheets.len();
@@ -662,6 +680,9 @@ impl DataView {
         self.find_window(ui.ctx(), maix, sheet, now_ms, &mut batch);
         self.filter_window(ui.ctx(), maix, sheet);
         self.compare_window(ui.ctx(), maix, sheet, now_ms);
+        self.cube_window(ui.ctx(), maix, sheet);
+        self.extras_window(ui.ctx(), maix, sheet);
+        self.list_window(ui.ctx(), maix, sheet, now_ms, &mut batch);
         let extra = std::mem::take(&mut self.steps);
         let mut changed = maix.sheets.len() != sheets_before;
         if !batch.is_empty() || !extra.is_empty() || self.needs_calc || maix.history.len() != history_before {
@@ -733,7 +754,7 @@ impl DataView {
             if response.lost_focus() {
                 let escaped = ui.input(|i| i.key_pressed(Key::Escape));
                 if !escaped {
-                    put_input(maix, sheet, self.focus, &text, now, batch);
+                    self.checked_put(maix, sheet, self.focus, &text, now, batch);
                     if ui.input(|i| i.key_pressed(Key::Enter)) {
                         self.step(maix, sheet, 1, 0, false);
                     }
@@ -751,9 +772,13 @@ impl DataView {
         let lay = maix.sheet(sheet).ok().map(|s| &s.format.layout);
         let hidden_row = |r: i64| lay.is_some_and(|l| u32::try_from(r).is_ok_and(|r| l.hidden_rows.contains(&r)));
         let hidden_col = |c: i64| lay.is_some_and(|l| u16::try_from(c).is_ok_and(|c| l.hidden_cols.contains(&c)));
-        let row = walk(i64::from(self.focus.0), dr.signum(), dr.unsigned_abs(), i64::from(MAX_ROWS) - 1, hidden_row);
-        let col = walk(i64::from(self.focus.1), dc.signum(), dc.unsigned_abs(), i64::from(MAX_COLS) - 1, hidden_col);
-        self.focus = (u32::try_from(row).unwrap_or(0), u16::try_from(col).unwrap_or(0));
+        // Leaving a merged area starts from its far edge, so the cursor does not stick to it.
+        let merged = maix.sheet(sheet).ok().and_then(|s| s.format.extras.merge_at(self.focus.0, self.focus.1));
+        let start = merged.map_or(self.focus, |m| (if dr > 0 { m.2 } else { m.0 }, if dc > 0 { m.3 } else { m.1 }));
+        let row = walk(i64::from(start.0), dr.signum(), dr.unsigned_abs(), i64::from(MAX_ROWS) - 1, hidden_row);
+        let col = walk(i64::from(start.1), dc.signum(), dc.unsigned_abs(), i64::from(MAX_COLS) - 1, hidden_col);
+        let to = (u32::try_from(row).unwrap_or(0), u16::try_from(col).unwrap_or(0));
+        self.focus = if dr == 0 && dc == 0 { self.focus } else { Self::merge_origin(maix, sheet, to) };
         if !extend {
             self.anchor = self.focus;
         }
@@ -923,24 +948,28 @@ impl DataView {
         }
     }
 
-    /// The dimension vector the grid shows and writes: pick a value per dimension or add one.
-    fn dimension_menu(&mut self, ui: &mut egui::Ui, maix: &mut Maix) {
-        let label = if maix.active_dims.is_empty() { "Dimensions".to_string() } else { format!("Dimensions: {}", alfadoc_model::dims::canonical(&maix.active_dims).replace('|', ", ")) };
-        ui.menu_button(label, |ui| {
-            ui.set_min_width(280.0);
-            let mut known: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = std::collections::BTreeMap::new();
-            for (_, vector) in maix.vectors.iter() {
-                for (k, v) in vector {
-                    known.entry(k.clone()).or_default().insert(v.clone());
+    /// The Dimensions menu: every dimension and value that was ever created is listed, whether
+    /// or not it is the one chosen now. Pick a value per dimension, add values, add dimensions.
+    pub(super) fn dimension_menu(&mut self, ui: &mut egui::Ui, maix: &mut Maix) {
+        // Clicks inside (the value boxes, the drop-downs, Add) must not close the menu: only a
+        // click outside it, or Escape, does.
+        let config = egui::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        egui::menu::MenuButton::new("Dimensions").config(config).ui(ui, |ui| {
+            ui.set_min_width(340.0);
+            let showing = if maix.active_dims.is_empty() { "plain values".to_string() } else { alfadoc_model::dims::canonical(&maix.active_dims).replace('|', ", ") };
+            ui.horizontal(|ui| {
+                ui.strong("Showing:");
+                ui.label(showing);
+                if ui.add_enabled(!maix.active_dims.is_empty(), egui::Button::new("Plain values")).on_hover_text("Choose no value for any dimension").clicked() {
+                    maix.active_dims.clear();
                 }
+            });
+            ui.separator();
+            let catalog = maix.dimension_catalog();
+            if catalog.is_empty() {
+                ui.weak("No dimensions yet. Add one below, for example scenario with the value actual.");
             }
-            for (k, v) in &maix.active_dims {
-                known.entry(k.clone()).or_default().insert(v.clone());
-            }
-            if known.is_empty() {
-                ui.weak("No dimensions yet. Add one below, for example scenario = actual.");
-            }
-            for (key, values) in &known {
+            for (key, values) in &catalog {
                 let current = maix.active_dims.get(key).cloned();
                 ui.horizontal(|ui| {
                     ui.label(key);
@@ -949,24 +978,45 @@ impl DataView {
                             maix.active_dims.remove(key);
                         }
                         for value in values {
-                            if ui.selectable_label(current.as_deref() == Some(value.as_str()), value).clicked() {
+                            let used = maix.dimension_in_use(key, Some(value));
+                            let text = if used { value.clone() } else { format!("{value}  (no data yet)") };
+                            if ui.selectable_label(current.as_deref() == Some(value.as_str()), text).clicked() {
                                 maix.active_dims.insert(key.clone(), value.clone());
                             }
                         }
                     });
+                    let input = self.dim_inputs.entry(key.clone()).or_default();
+                    let r = ui.add(egui::TextEdit::singleline(input).hint_text("new value").desired_width(80.0));
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    if (ui.button("Add").on_hover_text("Add this value to the dimension and use it").clicked() || enter) && maix.declare_dimension(key, Some(input.as_str())) {
+                        maix.active_dims.insert(key.clone(), input.trim().to_string());
+                        input.clear();
+                    }
+                    let removable = current.as_deref().is_some_and(|v| !maix.dimension_in_use(key, Some(v)));
+                    if ui.add_enabled(removable, egui::Button::new("−")).on_hover_text("Remove the chosen value (only while no cell is stored under it)").on_disabled_hover_text("Choose a value that has no data to remove it").clicked()
+                        && let Some(v) = &current
+                    {
+                        maix.forget_dimension(key, Some(v));
+                    }
+                    if ui.add_enabled(!maix.dimension_in_use(key, None), egui::Button::new("×")).on_hover_text("Remove this dimension").on_disabled_hover_text("Cells are stored under this dimension, so it stays").clicked() {
+                        maix.forget_dimension(key, None);
+                        self.dim_inputs.remove(key);
+                    }
                 });
             }
             ui.separator();
+            ui.strong("New dimension");
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.dim_key).hint_text("dimension").desired_width(95.0));
-                ui.add(egui::TextEdit::singleline(&mut self.dim_value).hint_text("value").desired_width(95.0));
-                if ui.button("Use").clicked() && !self.dim_key.trim().is_empty() && !self.dim_value.trim().is_empty() {
+                ui.add(egui::TextEdit::singleline(&mut self.dim_value).hint_text("first value").desired_width(95.0));
+                let ready = !self.dim_key.trim().is_empty() && !self.dim_value.trim().is_empty();
+                if ui.add_enabled(ready, egui::Button::new("Add")).clicked() && maix.declare_dimension(&self.dim_key, Some(&self.dim_value)) {
                     maix.active_dims.insert(self.dim_key.trim().to_string(), self.dim_value.trim().to_string());
                     self.dim_key.clear();
                     self.dim_value.clear();
                 }
             });
-            ui.weak("What you type is stored under the chosen values; with none chosen it is the plain value. Formulas can read another vector: =B2@{scenario=budget}, =DIMSUM(B2:B9, \"scenario=actual\").");
+            ui.weak("What you type is stored under the chosen values; with none chosen it is the plain value. Names cannot contain | or =. Formulas can read another vector: =B2@{scenario=budget}, =DIMSUM(B2:B9, \"scenario=actual\").");
         });
     }
 
@@ -995,7 +1045,6 @@ impl DataView {
                 }
                 response.context_menu(|ui| self.sheet_tab_menu(ui, maix, id, &name));
             }
-            self.dimension_menu(ui, maix);
             if ui.button("+").on_hover_text("Add a sheet").clicked() {
                 let mut n = maix.sheets.len() + 1;
                 while maix.sheet_by_name(&format!("Sheet{n}")).is_some() {
@@ -1026,6 +1075,9 @@ impl DataView {
                 if numbers > 0 {
                     parts.push(format!("Sum {}", number(sum)));
                     parts.push(format!("Average {}", number(sum / numbers as f64)));
+                }
+                if !maix.active_dims.is_empty() {
+                    parts.push(format!("Showing {}", alfadoc_model::dims::canonical(&maix.active_dims).replace('|', ", ")));
                 }
                 parts.push(format!("{}%", (self.zoom * 100.0).round()));
                 ui.weak(parts.join("   "));

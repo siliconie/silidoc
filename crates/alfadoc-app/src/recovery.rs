@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub const CHECK_SECS: f64 = 5.0;
 /// The least time between two copies.
 pub const COPY_SECS: f64 = 30.0;
+/// How long after a Save or Open the editors count as settled.
+const BASELINE_SECS: f64 = 1.5;
 /// A copy whose heartbeat is older than this belongs to a window that is gone.
 const STALE_MS: u64 = 120_000;
 /// Copies older than this are dropped without asking.
@@ -123,12 +125,15 @@ pub struct Recovery {
     last_beat: f64,
     /// A Save or Open happened: the next look records the new "clean" state.
     reset: bool,
+    /// When (egui clock) the pending reset was first noticed: the editors get a moment to settle
+    /// before their state counts as the saved one.
+    reset_seen: Option<f64>,
     wrote: bool,
 }
 
 impl Recovery {
     pub fn new(id: String) -> Self {
-        Recovery { id, dir: folder(), clean: None, last_check: 0.0, last_copy: f64::NEG_INFINITY, last_beat: 0.0, reset: true, wrote: false }
+        Recovery { id, dir: folder(), clean: None, last_check: 0.0, last_copy: f64::NEG_INFINITY, last_beat: 0.0, reset: true, reset_seen: None, wrote: false }
     }
 
     /// Whether it is time to look at the editors again (and, if so, restarts the wait).
@@ -143,6 +148,7 @@ impl Recovery {
     /// The work was saved, or a package was opened: forget the copy and watch for new edits.
     pub fn saved(&mut self) {
         self.reset = true;
+        self.reset_seen = None;
         self.remove_files();
     }
 
@@ -195,6 +201,33 @@ impl Recovery {
         let note = Note { id: self.id.clone(), original: original.map(|p| p.to_string_lossy().into_owned()), title: title.to_string(), saved_at: saved_at.unwrap_or(heartbeat), heartbeat };
         let text = serde_json::to_vec(&note).map_err(|e| e.to_string())?;
         std::fs::write(dir.join(format!("{}.json", self.id)), text).map_err(|e| e.to_string())
+    }
+
+    /// True when the saved state still has to be recorded and the editors have had a moment to
+    /// settle since the Save or Open. Call [`set_baseline`](Self::set_baseline) then.
+    pub fn baseline_due(&mut self, now: f64) -> bool {
+        if !self.reset {
+            return false;
+        }
+        let since = *self.reset_seen.get_or_insert(now);
+        now - since >= BASELINE_SECS
+    }
+
+    /// Whether a Save or Open is still waiting for its state to be recorded.
+    pub fn baseline_pending(&self) -> bool {
+        self.reset
+    }
+
+    /// Records `signature` as the saved state.
+    pub fn set_baseline(&mut self, signature: u64) {
+        self.reset = false;
+        self.reset_seen = None;
+        self.clean = Some(signature);
+    }
+
+    /// Whether the work differs from what was last saved or opened.
+    pub fn is_dirty(&self, signature: u64) -> bool {
+        !self.reset && self.clean != Some(signature)
     }
 
     /// Treats the current state as unsaved (after work was recovered), so a new copy follows.
@@ -272,6 +305,24 @@ mod tests {
         std::mem::forget(dead);
         std::mem::forget(live);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unsaved_changes_are_told_from_the_saved_state() {
+        let mut r = recovery_in(&temp("dirty"), "d");
+        assert!(!r.is_dirty(7), "nothing is recorded yet, so nothing counts as changed");
+        assert!(!r.baseline_due(10.0), "the editors get a moment to settle");
+        assert!(r.baseline_due(11.6));
+        r.set_baseline(7);
+        assert!(!r.is_dirty(7));
+        assert!(r.is_dirty(8), "an edit changes the signature");
+        r.saved();
+        assert!(!r.is_dirty(8), "after a Save the next state is recorded again");
+        assert!(!r.baseline_due(20.0));
+        assert!(r.baseline_due(21.6));
+        r.set_baseline(8);
+        r.mark_unsaved();
+        assert!(r.is_dirty(8), "recovered work is unsaved");
     }
 
     #[test]

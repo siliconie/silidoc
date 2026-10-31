@@ -22,6 +22,8 @@ pub enum Error {
     WrongPassphrase,
     #[error("security: {0}")]
     Security(String),
+    #[error("damaged data pages: {0}")]
+    Paged(String),
     #[error("zip error: {0}")]
     Zip(String),
     #[error("json error: {0}")]

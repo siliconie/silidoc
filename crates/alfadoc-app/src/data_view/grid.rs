@@ -3,17 +3,19 @@
 
 use alfadoc_bridge::textcell;
 use alfadoc_model::format::{DEFAULT_COL_W, DEFAULT_ROW_H, MAX_COLS, MAX_ROWS, MIN_SIZE};
-use alfadoc_model::{CellStyle, HAlign, Maix, Value};
+use alfadoc_model::{Axis, CellStyle, HAlign, Look, Maix, ValidKind, Value};
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, CursorIcon, FontId, Key, Painter, Pos2, Rect, Sense, Stroke, Vec2};
 
 use super::axis::{Frame, Lines, scroll_to_show};
-use super::{Cell, Change, DataView, Drag, HEADER_H, HEADER_W, Hit, MIN_COLS, MIN_ROWS, Palette, Range, cell_count, column_name, numfmt, put_input, whole_cols, whole_rows};
+use super::{Cell, Change, DataView, Drag, HEADER_H, HEADER_W, Hit, MIN_COLS, MIN_ROWS, Palette, Range, cell_count, column_name, numfmt, whole_cols, whole_rows};
 
 /// Width of the scroll bars.
 const SB: f32 = 12.0;
 /// How close to a header edge the pointer must be to grab it.
 const EDGE: f32 = 4.0;
+/// What an empty cell is for the conditional rules.
+static NULL_VALUE: Value = Value::Null;
 /// Default text size at 100% zoom.
 const FONT: f32 = 13.5;
 
@@ -69,6 +71,22 @@ fn paint_cell(p: &Painter, pal: &Palette, zoom: f32, rc: Rect, value: Option<&Va
     if st.bold {
         clipped.galley(Pos2::new(x + 0.7 * zoom, y), galley, color);
     }
+}
+
+/// The style a cell has once the conditional rules' look is laid over it (`None`: unchanged).
+fn looked(style: Option<&CellStyle>, look: Look) -> Option<CellStyle> {
+    if look == Look::default() {
+        return None;
+    }
+    let mut s = style.cloned().unwrap_or_default();
+    if look.fill.is_some() {
+        s.fill = look.fill;
+    }
+    if look.color.is_some() {
+        s.color = look.color;
+    }
+    s.bold |= look.bold;
+    Some(s)
 }
 
 /// The drop-down button of a filtered title cell.
@@ -227,6 +245,20 @@ impl DataView {
         };
 
         let fview = self.filter_view(sheet);
+        let merges: Vec<alfadoc_model::Rect> = maix.sheet(sheet).map(|s| s.format.extras.merges.clone()).unwrap_or_default();
+        let origin = |c: Cell| -> Cell { merges.iter().find(|m| c.0 >= m.0 && c.0 <= m.2 && c.1 >= m.1 && c.1 <= m.3).map_or(c, |m| (m.0, m.1)) };
+        let scales = self.scales(maix, sheet);
+        // The drop-down arrow of a list-validated active cell.
+        let list_arrow: Option<Rect> = if self.edit.is_some() {
+            None
+        } else {
+            maix.sheet(sheet)
+                .ok()
+                .and_then(|sh| sh.format.extras.validation_at(self.focus.0, self.focus.1))
+                .filter(|v| matches!(v.kind, ValidKind::List { .. }))
+                .map(|_| arrow_rect(cell_rect(self.focus.0, self.focus.1)))
+                .filter(|r| body.contains(r.center()))
+        };
         let arrow_hit = |p: Pos2| -> Option<u16> {
             let (range, _) = fview.as_ref()?;
             let Some(Hit::Cell((r, c))) = hit_at(p) else { return None };
@@ -266,6 +298,9 @@ impl DataView {
             if fill_handle.is_some_and(|h| h.expand(3.0).contains(p)) {
                 self.drag = Some(Drag::Fill { src: self.sel() });
                 self.fill_target = None;
+            } else if list_arrow.is_some_and(|r| r.contains(p)) {
+                let at = cell_rect(self.focus.0, self.focus.1).left_bottom();
+                self.list_pick = Some((self.focus, at));
             } else if let Some(col) = arrow_hit(p) {
                 self.open_filter_popup(maix, sheet, col);
             } else if let Some((cols, idx)) = edge_at(p) {
@@ -283,6 +318,7 @@ impl DataView {
             } else {
                 match hit_at(p) {
                     Some(Hit::Cell(cell)) => {
+                        let cell = origin(cell);
                         self.focus = cell;
                         if !shift {
                             self.anchor = cell;
@@ -410,6 +446,7 @@ impl DataView {
             if let Some((cols, idx)) = edge_at(p) {
                 self.autofit(ui, maix, sheet, cols, idx);
             } else if let Some(Hit::Cell(cell)) = hit_at(p) {
+                let cell = origin(cell);
                 self.focus = cell;
                 self.anchor = cell;
                 self.begin_edit(maix, sheet, None);
@@ -439,6 +476,7 @@ impl DataView {
         let line = Stroke::new(1.0, pal.line);
         {
             let Ok(sh) = maix.sheet(sheet) else { return };
+            let ex = &sh.format.extras;
             let dim = maix.vectors.find(&maix.active_dims);
             for (rr, cc, clip) in &quads {
                 if rr.is_empty() || cc.is_empty() || !clip.is_positive() {
@@ -466,6 +504,19 @@ impl DataView {
                         }
                     }
                 }
+                for m in &ex.merges {
+                    if m.0 >= rr.end || m.2 < rr.start || u32::from(m.1) >= cc.end || u32::from(m.3) < cc.start {
+                        continue;
+                    }
+                    let area = Rect::from_min_max(cell_rect(m.0, m.1).min, cell_rect(m.2, m.3).max);
+                    p.rect_filled(area, 0.0, pal.cell);
+                    let value = dim.and_then(|d| sh.get(m.0, m.1, d)).map(|cell| &cell.value);
+                    let style = sh.format.get(sh.format.id_at(m.0, m.1));
+                    let look = if ex.rules.is_empty() { Look::default() } else { ex.look(m.0, m.1, value.unwrap_or(&NULL_VALUE), &|i| scales.get(i).copied().flatten()) };
+                    let owned = looked(style, look);
+                    paint_cell(&p, &pal, zoom, area, value, owned.as_ref().or(style));
+                    p.rect_stroke(area, 0.0, line, egui::StrokeKind::Inside);
+                }
                 for r in rr.clone() {
                     let (y, h) = (rf.pos(r), rf.len_of(r));
                     if h <= 0.0 {
@@ -477,8 +528,14 @@ impl DataView {
                             continue;
                         }
                         let Ok(col) = u16::try_from(c) else { continue };
+                        if !ex.merges.is_empty() && ex.covered(r, col) {
+                            continue;
+                        }
                         let value = dim.and_then(|d| sh.get(r, col, d)).map(|cell| &cell.value);
                         let style = sh.format.get(sh.format.id_at(r, col));
+                        let look = if ex.rules.is_empty() { Look::default() } else { ex.look(r, col, value.unwrap_or(&NULL_VALUE), &|i| scales.get(i).copied().flatten()) };
+                        let owned = looked(style, look);
+                        let style = owned.as_ref().or(style);
                         if value.is_some() || style.is_some() {
                             paint_cell(&p, &pal, zoom, Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)), value, style);
                         }
@@ -495,12 +552,30 @@ impl DataView {
                         }
                     }
                 }
+                for note in &ex.comments {
+                    if note.row >= rr.start && note.row < rr.end && u32::from(note.col) >= cc.start && u32::from(note.col) < cc.end {
+                        let rc = cell_rect(note.row, note.col);
+                        let end = ex.merge_at(note.row, note.col).map_or(rc.max, |m| cell_rect(m.2, m.3).max);
+                        let s = (7.0 * zoom).clamp(5.0, 10.0);
+                        p.add(egui::Shape::convex_polygon(vec![Pos2::new(end.x - s, rc.min.y), Pos2::new(end.x, rc.min.y), Pos2::new(end.x, rc.min.y + s)], Color32::from_rgb(0xD9, 0x30, 0x25), Stroke::NONE));
+                    }
+                }
                 let sel_rect = Rect::from_min_max(cell_rect(sel.0, sel.1).min, cell_rect(sel.2, sel.3).max);
                 if cell_count(sel) > 1 {
                     p.rect_filled(sel_rect, 0.0, pal.select_fill);
                     p.rect_stroke(sel_rect, 0.0, Stroke::new(1.5, pal.select_line), egui::StrokeKind::Inside);
                 }
-                p.rect_stroke(cell_rect(self.focus.0, self.focus.1), 0.0, Stroke::new(2.0, pal.select_line), egui::StrokeKind::Inside);
+                let focus_rect = match ex.merge_at(self.focus.0, self.focus.1) {
+                    Some(m) => Rect::from_min_max(cell_rect(m.0, m.1).min, cell_rect(m.2, m.3).max),
+                    None => cell_rect(self.focus.0, self.focus.1),
+                };
+                p.rect_stroke(focus_rect, 0.0, Stroke::new(2.0, pal.select_line), egui::StrokeKind::Inside);
+                if let Some(ar) = list_arrow {
+                    p.rect_filled(ar, 2.0, pal.header);
+                    p.rect_stroke(ar, 2.0, Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
+                    let (c, k) = (ar.center(), ar.width() * 0.22);
+                    p.add(egui::Shape::convex_polygon(vec![Pos2::new(c.x - k, c.y - k * 0.5), Pos2::new(c.x + k, c.y - k * 0.5), Pos2::new(c.x, c.y + k * 0.8)], pal.header_text, Stroke::NONE));
+                }
             }
         }
 
@@ -519,6 +594,7 @@ impl DataView {
 
         // ---- the headers stay in view
         {
+            let ex = maix.sheet(sheet).ok().map(|s| &s.format.extras);
             let hfont = FontId::proportional(12.0 * zoom);
             ui.painter().rect_filled(Rect::from_min_max(rect.min, body.min), 0.0, pal.header);
             let col_areas = [(c_frozen.clone(), Rect::from_min_max(Pos2::new(body.min.x, rect.min.y), Pos2::new(split_x, body.min.y))), (c_scroll.clone(), Rect::from_min_max(Pos2::new(split_x, rect.min.y), Pos2::new(body.max.x, body.min.y)))];
@@ -539,6 +615,9 @@ impl DataView {
                         p.rect_filled(hr, 0.0, if whole_cols(sel) { pal.select_fill.gamma_multiply(1.6) } else { pal.select_fill });
                     }
                     p.vline(x + w, hr.y_range(), line);
+                    for k in 0..ex.map_or(0, |e| e.level(Axis::Cols, c)) {
+                        p.rect_filled(Rect::from_min_size(Pos2::new(hr.min.x, hr.min.y + 1.0 + f32::from(k) * 3.0), Vec2::new(hr.width(), 2.0)), 0.0, pal.select_line.gamma_multiply(0.6));
+                    }
                     p.text(hr.center(), Align2::CENTER_CENTER, column_name(col), hfont.clone(), pal.header_text);
                 }
             }
@@ -559,6 +638,9 @@ impl DataView {
                         p.rect_filled(hr, 0.0, if whole_rows(sel) { pal.select_fill.gamma_multiply(1.6) } else { pal.select_fill });
                     }
                     p.hline(hr.x_range(), y + h, line);
+                    for k in 0..ex.map_or(0, |e| e.level(Axis::Rows, r)) {
+                        p.rect_filled(Rect::from_min_size(Pos2::new(hr.min.x + 1.0 + f32::from(k) * 3.0, hr.min.y), Vec2::new(2.0, hr.height())), 0.0, pal.select_line.gamma_multiply(0.6));
+                    }
                     p.text(hr.center(), Align2::CENTER_CENTER, (r + 1).to_string(), hfont.clone(), pal.header_text);
                 }
             }
@@ -596,7 +678,7 @@ impl DataView {
             if escaped {
                 ui.memory_mut(|m| m.request_focus(grid_id));
             } else if r.lost_focus() {
-                put_input(maix, sheet, edit.cell, &edit.text, now, batch);
+                self.checked_put(maix, sheet, edit.cell, &edit.text, now, batch);
                 let (enter, tab, shift) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Tab), i.modifiers.shift));
                 if enter || tab {
                     ui.memory_mut(|m| m.request_focus(grid_id));
@@ -619,6 +701,22 @@ impl DataView {
         scrollbar(ui, &pal, grid_id.with("vbar"), vbar, true, &mut self.scroll.1, frozen_h, view_h, total_h);
         scrollbar(ui, &pal, grid_id.with("hbar"), hbar, false, &mut self.scroll.0, frozen_w, view_w, total_w);
         ui.painter().rect_filled(Rect::from_min_max(Pos2::new(rect.max.x - SB, rect.max.y - SB), rect.max), 0.0, pal.header);
+
+        // ---- a comment shows while the pointer rests on its cell
+        if self.drag.is_none()
+            && let Some(p) = ui.input(|i| i.pointer.hover_pos())
+            && body.contains(p)
+            && let Some(Hit::Cell(c)) = hit_at(p)
+        {
+            let c = origin(c);
+            let note = maix.sheet(sheet).ok().and_then(|s| s.format.extras.comment_at(c.0, c.1).map(str::to_string));
+            if let Some(text) = note {
+                response.clone().on_hover_ui_at_pointer(|ui| {
+                    ui.set_max_width(280.0);
+                    ui.label(text);
+                });
+            }
+        }
 
         // ---- context menu (what it offers depends on what was right-clicked)
         response.context_menu(|ui| self.context_menu(ui, maix, sheet, now, batch));

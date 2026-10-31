@@ -4,6 +4,7 @@ use alfadoc_model::{Axis, CellStyle, HAlign, Maix};
 use egui::{Align2, Key, RichText, Sense, Vec2};
 
 use super::grid::rgb;
+use super::extras_ui::GroupAction;
 use super::ops::{PasteKind, PasteOpts, Toggle};
 use super::{Change, DataView, Hit, MAX_ZOOM, MIN_ZOOM, cell_count, clear, column_name, numfmt, parse_address, value_at, whole_cols, whole_rows};
 use alfadoc_model::format::{MAX_COLS, MAX_COL_W, MAX_ROWS, MAX_ROW_H, MIN_SIZE};
@@ -79,6 +80,7 @@ impl DataView {
             ui.menu_button("Insert", |ui| self.insert_menu(ui, maix, sheet, now));
             ui.menu_button("Format", |ui| self.format_menu(ui, maix, sheet));
             ui.menu_button("Data", |ui| self.data_menu(ui, maix, sheet));
+            self.dimension_menu(ui, maix);
             ui.menu_button("View", |ui| self.view_menu(ui, maix, sheet));
         });
     }
@@ -181,6 +183,13 @@ impl DataView {
             self.delete_lines(maix, sheet, Axis::Cols, u32::from(sel.1), cols);
         }
         ui.separator();
+        if item(ui, "Comment…", "", true) {
+            self.open_comment(maix, sheet);
+        }
+        if item(ui, "Delete comment", "", true) {
+            self.delete_comment(maix, sheet);
+        }
+        ui.separator();
         if item(ui, "New sheet", "", true) {
             self.add_sheet(maix);
         }
@@ -212,6 +221,16 @@ impl DataView {
         });
         ui.separator();
         self.size_items(ui, maix, sheet);
+        ui.separator();
+        if item(ui, "Merge cells", "", true) {
+            self.merge_selection(maix, sheet);
+        }
+        if item(ui, "Unmerge cells", "", true) {
+            self.unmerge_selection(maix, sheet);
+        }
+        if item(ui, "Conditional formatting…", "", true) {
+            self.open_rules();
+        }
         ui.separator();
         if item(ui, "Clear formatting", "", true) {
             self.clear_formats(maix, sheet);
@@ -306,6 +325,34 @@ impl DataView {
         if item(ui, "Compare vectors…", "", true) {
             self.open_compare(maix);
         }
+        if item(ui, "3D view…", "", true) {
+            self.open_cube(maix);
+        }
+        ui.separator();
+        if item(ui, "Data validation…", "", true) {
+            self.open_validation(maix, sheet);
+        }
+        ui.menu_button("Group", |ui| {
+            if item(ui, "Group the selected rows or columns", "", true) {
+                self.group_selection(maix, sheet);
+            }
+            if item(ui, "Ungroup", "", true) {
+                self.ungroup_selection(maix, sheet);
+            }
+            ui.separator();
+            if item(ui, "Collapse the group here", "", true) {
+                self.group_action(maix, sheet, GroupAction::CollapseHere);
+            }
+            if item(ui, "Expand the group here", "", true) {
+                self.group_action(maix, sheet, GroupAction::ExpandHere);
+            }
+            if item(ui, "Collapse all groups", "", true) {
+                self.group_action(maix, sheet, GroupAction::CollapseAll);
+            }
+            if item(ui, "Expand all groups", "", true) {
+                self.group_action(maix, sheet, GroupAction::ExpandAll);
+            }
+        });
     }
 
     fn view_menu(&mut self, ui: &mut egui::Ui, maix: &mut Maix, sheet: u16) {

@@ -6,6 +6,8 @@
 //! * The engines share one egui context, so the shell swaps their fonts/colours/zoom on every tab
 //!   change ([`ContextState`]).
 
+mod leave;
+
 use crate::ctxstate::ContextState;
 use crate::hosts;
 use crate::data_view::DataView;
@@ -15,6 +17,7 @@ use crate::package;
 use crate::protect::{Protect, Unlock};
 use crate::recovery::{self, Recovery};
 use alfadoc_model::Alfadoc;
+use leave::{ExportDialog, LeaveState};
 use std::path::PathBuf;
 
 use deckcraft_ui_egui::SlideApp;
@@ -157,6 +160,10 @@ pub struct Shell {
     pub(crate) data: DataView,
     /// Keeps a copy of unsaved work so a crash loses nothing (`recovery.rs`).
     pub(crate) recovery: Recovery,
+    /// The "Save changes?" question and what it guards (`shell/leave.rs`).
+    leave: LeaveState,
+    /// The Export window's choices.
+    export: ExportDialog,
     /// The key of a passphrase-protected document: Save and recovery copies are encrypted with it.
     pub(crate) key: Option<alfadoc_model::security::Protector>,
     /// A protected file that is waiting for its passphrase.
@@ -179,7 +186,7 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(start: Tab, startup: Option<PathBuf>) -> Shell {
-        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), key: None, unlock: None, protect: Protect::default(), recover_prompt: vec![], recover_checked: false, calc_seen: 0, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default(), links_view: LinksTab::default() }
+        Shell { active: start, pending: None, grid: None, word: None, deck: None, saved: [None, None, None, None, None], frames: 0, package: package::new_package(), file: None, want: None, toast: None, toast_text: None, startup, #[cfg(target_arch = "wasm32")] web_inbox: Default::default(), externals: std::collections::HashMap::new(), data: DataView::default(), recovery: Recovery::new(package::new_id()), leave: LeaveState::default(), export: ExportDialog::default(), key: None, unlock: None, protect: Protect::default(), recover_prompt: vec![], recover_checked: false, calc_seen: 0, recovery_word: None, recovery_word_edits: 0, #[cfg(not(target_arch = "wasm32"))] _print_guard: crate::platform::print::ExitGuard, draft: LinkDraft::default(), watch: Watch::default(), links_view: LinksTab::default() }
     }
 
     fn ensure(&mut self, ctx: &egui::Context, tab: Tab) {
@@ -387,8 +394,8 @@ impl Shell {
         Ok(Some(format!("Imported {name}")))
     }
 
-    /// The current editor's document as an Office file: its bytes and extension.
-    fn export_bytes(&mut self) -> Result<(Vec<u8>, &'static str), String> {
+    /// The current editor's document as an Office file, as it is now.
+    fn export_plain(&mut self) -> Result<(Vec<u8>, &'static str), String> {
         let ext = match self.active {
             Tab::Sheet => "xlsx",
             Tab::Document => "docx",
@@ -408,6 +415,9 @@ impl Shell {
     /// Writes the current editor's document as an Office file.
     #[cfg(not(target_arch = "wasm32"))]
     fn export_file(&mut self) -> Result<Option<String>, String> {
+        if self.export.kind == leave::ExportKind::Pdf {
+            return self.export_pdf();
+        }
         let (label, ext) = match self.active {
             Tab::Sheet => ("Excel workbook", "xlsx"),
             Tab::Document => ("Word document", "docx"),
@@ -668,8 +678,8 @@ impl Shell {
                 if ui.button("Import").on_hover_text("Bring an Excel, Word or PowerPoint file into its editor").clicked() {
                     self.want = Some(FileAction::Import);
                 }
-                if ui.button("Export").on_hover_text("Save the current editor's document as .xlsx, .docx or .pptx").clicked() {
-                    self.want = Some(FileAction::Export);
+                if ui.button("Export").on_hover_text("Save the current editor's document as .xlsx, .docx, .pptx or PDF").clicked() {
+                    self.export.open = !self.export.open;
                 }
                 if ui.button("Save As").on_hover_text("Save as a new .alfadoc file").clicked() {
                     self.want = Some(FileAction::SaveAs);
@@ -704,6 +714,7 @@ impl eframe::App for Shell {
         self.expire_toast(ctx);
         self.watch_links(ctx);
         self.recalc_data(ctx);
+        self.note_baseline(ctx);
         self.recovery_step(ctx);
         let active = self.active;
         self.ensure(ctx, active);
@@ -788,6 +799,8 @@ impl eframe::App for Shell {
         self.protect_window(ui.ctx());
         self.unlock_window(ui.ctx());
         self.recovery_window(ui.ctx());
+        self.export_window(ui.ctx());
+        self.leave_step(ui.ctx());
         self.frames = self.frames.saturating_add(1);
     }
 }

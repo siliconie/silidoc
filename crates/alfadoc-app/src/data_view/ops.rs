@@ -492,6 +492,10 @@ impl DataView {
 
     /// Sorts the rows of `range` by the column `key`; returns how many rows moved.
     pub(super) fn sort_rows_in(&mut self, maix: &mut Maix, sheet: u16, range: Range, key: u16, ascending: bool) -> Option<usize> {
+        if maix.sheet(sheet).is_ok_and(|s| s.format.extras.merges_touch(range)) {
+            self.say("Merged cells cannot be sorted. Unmerge them first.");
+            return None;
+        }
         let dims = maix.active_dims.clone();
         self.structural(maix, sheet, None, |m| m.sort_rows(sheet, range, key, ascending, &dims))
     }

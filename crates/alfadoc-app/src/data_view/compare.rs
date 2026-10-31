@@ -146,12 +146,7 @@ impl DataView {
             return;
         }
         let mut st = self.compare.clone();
-        let mut known: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (_, vector) in maix.vectors.iter() {
-            for (k, v) in vector {
-                known.entry(k.clone()).or_default().insert(v.clone());
-            }
-        }
+        let known: BTreeMap<String, BTreeSet<String>> = maix.dimension_catalog();
         let range = self.sel();
         let mut open = true;
         let mut copy: Option<String> = None;

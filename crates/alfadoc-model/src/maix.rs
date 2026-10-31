@@ -184,7 +184,16 @@ pub struct DimAxis {
     pub kind: String,
     #[serde(default)]
     pub required: bool,
+    /// The values declared for this dimension (so they are offered even before a cell uses them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
 }
+
+/// Longest dimension name or value.
+pub const MAX_DIM_TEXT: usize = 64;
+/// Most dimensions, and most values per dimension, that can be declared.
+pub const MAX_DIMS: usize = 64;
+pub const MAX_DIM_VALUES: usize = 500;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Maix {
@@ -212,6 +221,94 @@ impl Default for Maix {
 }
 
 impl Maix {
+    /// Every dimension with every value known: the declared ones, the ones some cell is stored
+    /// under, and the ones currently chosen.
+    pub fn dimension_catalog(&self) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+        let mut out: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+        for axis in &self.axes {
+            out.entry(axis.id.clone()).or_default().extend(axis.values.iter().cloned());
+        }
+        for (_, vector) in self.vectors.iter() {
+            for (k, v) in vector {
+                out.entry(k.clone()).or_default().insert(v.clone());
+            }
+        }
+        for (k, v) in &self.active_dims {
+            out.entry(k.clone()).or_default().insert(v.clone());
+        }
+        out
+    }
+
+    /// Declares a dimension and, if given, one of its values. Returns false when the names are
+    /// empty or too long, or there would be too many.
+    pub fn declare_dimension(&mut self, key: &str, value: Option<&str>) -> bool {
+        let key = key.trim();
+        let value = value.map(str::trim);
+        let ok = |t: &str| !t.is_empty() && t.chars().count() <= MAX_DIM_TEXT && !t.contains(['|', '=']);
+        if !ok(key) || value.is_some_and(|v| !ok(v)) {
+            return false;
+        }
+        let at = match self.axes.iter().position(|a| a.id == key) {
+            Some(i) => i,
+            None => {
+                if self.axes.len() >= MAX_DIMS {
+                    return false;
+                }
+                self.axes.push(DimAxis { id: key.to_string(), kind: "custom".into(), required: false, values: vec![] });
+                self.axes.len() - 1
+            }
+        };
+        if let (Some(v), Some(axis)) = (value, self.axes.get_mut(at))
+            && !axis.values.iter().any(|x| x == v)
+        {
+            if axis.values.len() >= MAX_DIM_VALUES {
+                return false;
+            }
+            axis.values.push(v.to_string());
+        }
+        true
+    }
+
+    /// Whether some stored vector uses `key = value` (or any value of `key` when `value` is None).
+    pub fn dimension_in_use(&self, key: &str, value: Option<&str>) -> bool {
+        self.vectors.iter().any(|(_, v)| v.get(key).is_some_and(|x| value.is_none_or(|w| w == x)))
+    }
+
+    /// Forgets a declared value (or a whole dimension when `value` is None) unless a stored
+    /// vector uses it. A chosen value is un-chosen. Returns whether anything was forgotten.
+    pub fn forget_dimension(&mut self, key: &str, value: Option<&str>) -> bool {
+        if self.dimension_in_use(key, value) {
+            return false;
+        }
+        match value {
+            Some(v) => {
+                if let Some(axis) = self.axes.iter_mut().find(|a| a.id == key) {
+                    axis.values.retain(|x| x != v);
+                }
+                if self.active_dims.get(key).is_some_and(|x| x == v) {
+                    self.active_dims.remove(key);
+                }
+            }
+            None => {
+                self.axes.retain(|a| a.id != key);
+                self.active_dims.remove(key);
+            }
+        }
+        true
+    }
+
+    /// How many cells (every dimension vector counted) the sheets hold together.
+    pub fn cell_total(&self) -> usize {
+        self.sheets.iter().map(Sheet::cell_count).sum()
+    }
+
+    /// The store without its cells: everything else, marked with the paged profile. The cells
+    /// travel separately in the data pages ([`crate::paged`]).
+    pub(crate) fn skeleton(&self) -> Maix {
+        let sheets = self.sheets.iter().map(|s| Sheet { id: s.id, name: s.name.clone(), columns: s.columns.clone(), meta: s.meta.clone(), format: s.format.clone(), cells: BTreeMap::new() }).collect();
+        Maix { profile: crate::paged::PROFILE_PAGED.into(), axes: self.axes.clone(), vectors: self.vectors.clone(), sheets, history: self.history.clone(), active_dims: self.active_dims.clone(), app_registry: self.app_registry.clone() }
+    }
+
     pub fn add_sheet(&mut self, name: &str) -> u16 {
         let id = self.sheets.iter().map(|s| s.id).max().map_or(1, |m| m.saturating_add(1));
         self.sheets.push(Sheet { id, name: name.to_string(), ..Sheet::default() });
@@ -386,6 +483,45 @@ mod tests {
     fn unknown_sheet_is_an_error_not_a_panic() {
         let mut m = Maix::default();
         assert!(m.set(9, 0, 0, &DimVector::new(), Value::Null, &Stamp::new("t", 1)).is_err());
+    }
+
+    #[test]
+    fn declared_dimensions_are_listed_even_before_a_cell_uses_them() {
+        let mut m = Maix::default();
+        assert!(m.declare_dimension("scenario", Some("actual")));
+        assert!(m.declare_dimension("scenario", Some("budget")));
+        assert!(m.declare_dimension("scenario", Some("budget")), "declaring twice is fine");
+        assert!(m.declare_dimension("region", None));
+        let catalog = m.dimension_catalog();
+        assert_eq!(catalog["scenario"].iter().cloned().collect::<Vec<_>>(), ["actual", "budget"]);
+        assert!(catalog["region"].is_empty());
+        // Choosing one does not hide the others.
+        m.active_dims.insert("scenario".into(), "actual".into());
+        assert_eq!(m.dimension_catalog()["scenario"].len(), 2);
+        // The declarations are saved.
+        let back: Maix = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.dimension_catalog(), m.dimension_catalog());
+    }
+
+    #[test]
+    fn odd_names_are_refused_and_used_values_cannot_be_forgotten() {
+        let mut m = Maix::default();
+        assert!(!m.declare_dimension("", Some("x")));
+        assert!(!m.declare_dimension("a|b", None));
+        assert!(!m.declare_dimension("a", Some("x=y")));
+        assert!(!m.declare_dimension("a", Some(&"v".repeat(MAX_DIM_TEXT + 1))));
+        let s = m.add_sheet("S");
+        m.declare_dimension("scenario", Some("actual"));
+        m.declare_dimension("scenario", Some("budget"));
+        let dims: DimVector = [("scenario".to_string(), "actual".to_string())].into_iter().collect();
+        m.set(s, 0, 0, &dims, Value::Int(1), &Stamp::new("t", 1)).unwrap();
+        assert!(m.dimension_in_use("scenario", Some("actual")));
+        assert!(!m.forget_dimension("scenario", Some("actual")), "a cell is stored under it");
+        assert!(!m.forget_dimension("scenario", None));
+        m.active_dims.insert("scenario".into(), "budget".into());
+        assert!(m.forget_dimension("scenario", Some("budget")));
+        assert!(m.active_dims.is_empty(), "a forgotten value is no longer chosen");
+        assert!(!m.dimension_catalog()["scenario"].contains("budget"));
     }
 
     #[test]

@@ -36,7 +36,7 @@ with `__cascade: replace` to stop inheritance. Implemented in `alfadoc-model::{d
 | Profile | Marker (`Maix.profile`) | Storage | Status |
 |---|---|---|---|
 | **JSON-records** | `maix/1.1-json` | `data/maix.json`: axes, vector table, sheets with a record per cell, history, app registry | **Implemented, used by Alfadoc v1** |
-| **Paged** | `maix/1.1-paged` | `sheets/*.mxb` etc., 4 KB pages, CRC-32C, B+ trees (1.0 draft §4–§10), stored uncompressed | Later; required only when a store no longer fits in memory |
+| **Paged** | `maix/1.1-paged` | `data/maix.pages`: 4 KB pages, CRC-32C, sorted leaf chain plus a leaf index, stored uncompressed (see "Paged profile" below) | Used automatically for stores of 200,000 cells or more |
 
 Both profiles carry the same logical content, so a store converts between them without loss. A
 reader that does not know a profile marker refuses the file.
@@ -67,7 +67,19 @@ view switches by choosing the vector. The same tag works on slide shapes. Becaus
 Word/PowerPoint tag, an exported file keeps all variants; a "flatten for this audience" export
 removes the others.
 
-**Status (v1).** The Data tab evaluates `DIMSUM`, `DIMAVG`, `DIMCOUNT`, `DIMSLICE` and the `@{…}` suffix in its own formulas (see `crates/alfadoc-model/src/formula.rs` for the exact grammar and error codes). Cells read each other's stored values and a recalculation repeats until nothing changes, so a circular reference stops after eight passes instead of being reported. The variant-block rule is implemented (`variant.rs`) and used for documents (Links ▸ Variant blocks): mark the selected words, then keep only the blocks for the current dimensions. Slide shapes work too (Links ▸ Variant blocks ▸ Slides): **Mark the selected shapes** stores the tag in each shape's alt text (after any alt text it had; the shape's name, and so links to it, stay as they are), and **Show only these shapes** shows the tagged shapes that fit the current dimensions and hides the others with the Selection Pane's Show/Hide, so Undo and the `.pptx` keep working. Documents still delete the other blocks instead of hiding them; a live show/hide view for documents and a "flatten for this audience" export are not done.
+**Status (v1).** The Data tab evaluates `DIMSUM`, `DIMAVG`, `DIMCOUNT`, `DIMSLICE` and the `@{…}` suffix in its own formulas (see `crates/alfadoc-model/src/formula.rs` for the exact grammar and error codes). Cells read each other's stored values and a recalculation repeats until nothing changes, so a circular reference stops after eight passes instead of being reported. The variant-block rule is implemented (`variant.rs`) and used for documents (Links ▸ Variant blocks): mark the selected words, then keep only the blocks for the current dimensions. Slide shapes work too (Links ▸ Variant blocks ▸ Slides): **Mark the selected shapes** stores the tag in each shape's alt text (after any alt text it had; the shape's name, and so links to it, stay as they are), and **Show only these shapes** shows the tagged shapes that fit the current dimensions and hides the others with the Selection Pane's Show/Hide, so Undo and the `.pptx` keep working. Documents still delete the other blocks instead of hiding them; a live show/hide view for documents is not done. The **Export** window can write a "flatten for this audience" copy of a document or slide deck (the blocks and shapes for other values are left out; your document is not changed). Variant tags that fit stay in the exported file.
+
+### Paged profile (`maix/1.1-paged`)
+
+A store with 200,000 or more cells (and at most 100 sheets) is saved in two entries instead of one big JSON document: `data/maix.json` keeps everything except the cells (sheets, columns, formats, dimensions, history) and carries the profile `maix/1.1-paged`; `data/maix.pages` holds the cells, **stored uncompressed** in the zip (E9). A smaller store stays one JSON document. Loading restores the plain in-memory store, so nothing above the storage layer changes; saving chooses the form by size, and a file written either way opens in either version of the program that knows the profile.
+
+`data/maix.pages` (`alfadoc-model::paged`) is a sequence of 4096-byte pages, each starting with a CRC-32C of the rest of the page, a kind, a record count and the number of the next page in its chain:
+
+* **Page 0, header:** magic `MXPG`, version 1, page size, page count, cell count, and for each sheet its id, cell count, first leaf, leaf count and first index page.
+* **Leaf pages:** the sheet's cells in (row, column, dimension hash) order, each record `row u32, col u16, dim u64`, then the cell body inline (value, formula, metadata, version, time) or, when the body is over 1 KB, the number of its **overflow pages**.
+* **Index pages:** for each leaf its first key and page number, so one cell is found by reading the index and a single leaf (`PagedStore::find`).
+
+Reading never trusts the file: every page it touches is checksummed, chains cannot loop (they stop at the declared length), lengths cannot run past their page, keys must be in order and counts must match the header. A damaged page is refused with the page number instead of loading wrong data. All numbers are little-endian.
 
 **Formulas stay Excel-compatible.** The dimension suffix and `DIMSUM`, `DIMAVG`, `DIMSLICE` are
 *additions* to GridCraft's existing formula language, never a replacement, so formulas imported

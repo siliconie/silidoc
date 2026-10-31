@@ -191,6 +191,67 @@ impl<S: BorrowMut<Session>> DeckEngine<S> {
         result.map(|()| todo.len())
     }
 
+    /// Deletes every tagged shape that does not belong to `active` (for a flattened export) and
+    /// returns how many deleting steps were made: pass that number to [`undo_steps`](Self::undo_steps)
+    /// to bring everything back. Untagged shapes stay.
+    pub fn drop_other_variants(&mut self, active: &DimVector) -> Result<usize, BridgeError> {
+        fn walk(shapes: &[Shape], active: &DimVector, depth: usize, out: &mut Vec<u32>) {
+            if depth > MAX_GROUP_DEPTH {
+                return;
+            }
+            for s in shapes {
+                if let Some(tag) = find_tag(&s.descr)
+                    && !visible(Some(tag), active)
+                {
+                    out.push(s.id.0);
+                    continue;
+                }
+                walk(s.children(), active, depth + 1, out);
+            }
+        }
+        let mut todo: Vec<(usize, Vec<u32>)> = vec![];
+        {
+            let doc = self.s().doc().map_err(map_err)?;
+            for (i, slide) in doc.doc.slides.iter().enumerate() {
+                let mut ids = vec![];
+                walk(&slide.shapes, active, 0, &mut ids);
+                if !ids.is_empty() {
+                    todo.push((i, ids));
+                }
+            }
+        }
+        if todo.is_empty() {
+            return Ok(0);
+        }
+        let back = self.current_slide()?;
+        let mut steps = 0;
+        let mut result = Ok(());
+        for (slide_index, ids) in &todo {
+            let step = self.go(*slide_index).and_then(|()| self.run("edit.delete", &json!({ "ids": ids })).map(|_| ()));
+            if step.is_err() {
+                result = step;
+                break;
+            }
+            steps += 1;
+        }
+        let returned = self.go(back);
+        match result {
+            Ok(()) => returned.map(|()| steps),
+            Err(e) => {
+                let _ = self.undo_steps(steps);
+                Err(e)
+            }
+        }
+    }
+
+    /// Undoes the last `n` edits of the presentation.
+    pub fn undo_steps(&mut self, n: usize) -> Result<(), BridgeError> {
+        for _ in 0..n {
+            self.run("edit.undo", &json!({}))?;
+        }
+        Ok(())
+    }
+
     /// How many tables the presentation holds, named or not.
     pub fn table_count(&self) -> Result<usize, BridgeError> {
         Ok(self.all_tables()?.len())
@@ -470,6 +531,24 @@ mod tests {
         assert!(!shape(&d).hidden);
         // The link still finds the table.
         assert!(d.read_region(&a).is_ok());
+    }
+
+    #[test]
+    fn other_variants_can_be_dropped_for_an_export_and_brought_back() {
+        let (mut d, _a) = deck_with_table();
+        let count = |d: &DeckEngine| d.session().doc().unwrap().doc.slides[0].shapes.len();
+        let before = count(&d);
+        let id = d.session().doc().unwrap().doc.slides[0].shapes.iter().find(|s| s.name == "sales").map(|s| s.id).unwrap();
+        d.execute("selection.select", &json!({ "id": id.0 })).unwrap();
+        let dims = |v: &str| -> DimVector { [("audience".to_string(), v.to_string())].into_iter().collect() };
+        d.mark_variant(&dims("client")).unwrap();
+        assert_eq!(d.drop_other_variants(&dims("client")).unwrap(), 0, "it fits, so it stays");
+        assert_eq!(count(&d), before);
+        let steps = d.drop_other_variants(&dims("internal")).unwrap();
+        assert_eq!(steps, 1);
+        assert_eq!(count(&d), before - 1);
+        d.undo_steps(steps).unwrap();
+        assert_eq!(count(&d), before, "undo brings the shape back");
     }
 
     #[test]

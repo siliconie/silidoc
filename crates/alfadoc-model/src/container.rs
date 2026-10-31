@@ -3,7 +3,9 @@
 //! ```text
 //! mimetype            "application/vnd.alfadoc+zip"   (first entry, stored uncompressed)
 //! manifest.json       identity, versions, part list
-//! data/maix.json      the maix store (JSON-records profile)
+//! data/maix.json      the maix store (JSON-records profile; for a store with very many cells the
+//!                     structure only, profile `maix/1.1-paged`)
+//! data/maix.pages     the cells of a paged store: 4 KB checked pages, stored uncompressed
 //! links.json          the link registry
 //! document/…          word-processor parts (WordCraft model)
 //! sheets/…            spreadsheet parts (GridCraft model)
@@ -91,7 +93,7 @@ pub fn validate_entry_name(name: &str) -> Result<()> {
     if bad { Err(Error::BadEntryName(name.to_string())) } else { Ok(()) }
 }
 
-const RESERVED: [&str; 4] = ["mimetype", "manifest.json", "data/maix.json", "links.json"];
+const RESERVED: [&str; 5] = ["mimetype", "manifest.json", "data/maix.json", "data/maix.pages", "links.json"];
 
 fn is_part_name(name: &str) -> bool {
     name.starts_with("document/") || name.starts_with("sheets/") || name.starts_with("slides/") || name.starts_with("assets/")
@@ -103,6 +105,11 @@ impl Alfadoc {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.to_bytes_paged_from(crate::paged::MIN_CELLS)
+    }
+
+    /// Like [`to_bytes`](Self::to_bytes), with the store paged from `min_cells` cells up.
+    pub(crate) fn to_bytes_paged_from(&self, min_cells: usize) -> Result<Vec<u8>> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
         let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -111,8 +118,15 @@ impl Alfadoc {
         zip.write_all(MIMETYPE.as_bytes())?;
         zip.start_file("manifest.json", deflated)?;
         zip.write_all(&serde_json::to_vec_pretty(&self.manifest)?)?;
-        zip.start_file("data/maix.json", deflated)?;
-        zip.write_all(&serde_json::to_vec(&self.maix)?)?;
+        if self.maix.sheets.len() <= crate::paged::MAX_SHEETS && self.maix.cell_total() >= min_cells {
+            zip.start_file("data/maix.json", deflated)?;
+            zip.write_all(&serde_json::to_vec(&self.maix.skeleton())?)?;
+            zip.start_file("data/maix.pages", stored)?;
+            zip.write_all(&crate::paged::encode(&self.maix)?)?;
+        } else {
+            zip.start_file("data/maix.json", deflated)?;
+            zip.write_all(&serde_json::to_vec(&self.maix)?)?;
+        }
         zip.start_file("links.json", deflated)?;
         zip.write_all(&serde_json::to_vec_pretty(&self.links)?)?;
         for (name, bytes) in &self.parts {
@@ -144,7 +158,11 @@ impl Alfadoc {
         if manifest.format != "alfadoc" {
             return Err(Error::NotAlfadoc(format!("format is {:?}", manifest.format)));
         }
-        let maix: Maix = serde_json::from_slice(entries.get("data/maix.json").ok_or(Error::MissingEntry("data/maix.json"))?)?;
+        let mut maix: Maix = serde_json::from_slice(entries.get("data/maix.json").ok_or(Error::MissingEntry("data/maix.json"))?)?;
+        if maix.profile == crate::paged::PROFILE_PAGED {
+            crate::paged::decode_into(&mut maix, entries.get("data/maix.pages").ok_or(Error::MissingEntry("data/maix.pages"))?)?;
+            maix.profile = crate::maix::PROFILE.into();
+        }
         let links: Vec<Link> = match entries.get("links.json") {
             Some(b) => serde_json::from_slice(b)?,
             None => vec![],
@@ -236,6 +254,62 @@ mod tests {
         let d = sample();
         let bytes = d.to_bytes().unwrap();
         assert_eq!(Alfadoc::from_bytes(&bytes).unwrap(), d);
+    }
+
+    fn big_sample(cells: u32) -> Alfadoc {
+        let mut d = sample();
+        let id = d.maix.sheets[0].id;
+        let sheet = d.maix.sheets.iter_mut().find(|s| s.id == id).unwrap();
+        for i in 0..cells {
+            sheet.cells.insert((100 + i / 10, (i % 10) as u16, 0), crate::maix::Cell { value: Value::Int(i64::from(i)), formula: None, version: 1, updated_at: 5, meta: Default::default() });
+        }
+        d
+    }
+
+    #[test]
+    fn a_large_store_is_written_as_pages_and_comes_back_whole() {
+        let d = big_sample(250);
+        let bytes = d.to_bytes_paged_from(100).unwrap();
+        let entries = read_entries(&bytes).unwrap();
+        assert!(entries.contains_key("data/maix.pages"));
+        let skeleton: Maix = serde_json::from_slice(&entries["data/maix.json"]).unwrap();
+        assert_eq!(skeleton.profile, crate::paged::PROFILE_PAGED);
+        assert_eq!(skeleton.cell_total(), 0, "the cells are in the pages");
+        let back = Alfadoc::from_bytes(&bytes).unwrap();
+        assert_eq!(back, d, "the profile is the plain one again once loaded");
+        assert_eq!(back.maix.profile, crate::maix::PROFILE);
+    }
+
+    #[test]
+    fn the_pages_are_stored_not_deflated() {
+        let bytes = big_sample(250).to_bytes_paged_from(100).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+        let file = zip.by_name("data/maix.pages").unwrap();
+        assert_eq!(file.compression(), CompressionMethod::Stored);
+        assert_eq!(file.size() % crate::paged::PAGE as u64, 0);
+    }
+
+    #[test]
+    fn a_small_store_stays_json_and_the_default_threshold_applies() {
+        let entries = read_entries(&sample().to_bytes().unwrap()).unwrap();
+        assert!(!entries.contains_key("data/maix.pages"));
+        let big = big_sample(crate::paged::MIN_CELLS as u32 + 10);
+        let entries = read_entries(&big.to_bytes().unwrap()).unwrap();
+        assert!(entries.contains_key("data/maix.pages"), "{} cells page by default", big.maix.cell_total());
+    }
+
+    #[test]
+    fn a_paged_package_with_damaged_or_missing_pages_is_refused() {
+        let d = big_sample(250);
+        let mut entries = read_entries(&d.to_bytes_paged_from(100).unwrap()).unwrap();
+        let mut broken = entries.clone();
+        if let Some(p) = broken.get_mut("data/maix.pages") {
+            let mid = p.len() / 2;
+            p[mid] ^= 1;
+        }
+        assert!(Alfadoc::from_bytes(&write_entries(&broken).unwrap()).is_err());
+        entries.remove("data/maix.pages");
+        assert!(matches!(Alfadoc::from_bytes(&write_entries(&entries).unwrap()), Err(Error::MissingEntry("data/maix.pages"))));
     }
 
     #[test]

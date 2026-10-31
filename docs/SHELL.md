@@ -19,8 +19,7 @@ data between tabs (M2).
 ## Not connected yet (each engine's own app wires these; the editors work without them)
 
 - Saved preferences, update checks, the local control channel.
-- A combined "unsaved changes" guard when the window closes: only the visible tab's guard runs.
-- Drag and drop of files, opening files from the command line.
+- Opening files from the command line works; the "unsaved changes" guard and drag and drop are connected (below).
 
 ## Connected on native builds
 
@@ -28,6 +27,11 @@ data between tabs (M2).
 - Auto-recovery (`recovery.rs`): while there are unsaved edits a full `.alfadoc` copy is written every 30 s to `%LOCALAPPDATA%\Alfadoc\recovery` (or the platform equivalent) with a heartbeat note. After a crash the next start offers "Recover unsaved work". A normal exit removes the copy.
 - Data tab: a virtualised grid editor (selection, fx bar, copy/paste TSV, undo/redo, sheet tabs, rename) painted from the theme colours; formulas starting with `=` and a Dimensions menu (see MAIX-1.1.md); ranges that links keep in step are tinted.
 - Links: conflicts are settled cell by cell in a Resolve dialog.
+- **Dimensions** is a menu of the Data tab's menu bar (after Data). It lists every dimension that was ever created with all its values, whether or not one is chosen now (declared values are saved in the file; a value with no data yet is marked). Each dimension has a drop-down to choose its value, a box to add a value, `−` to remove the chosen value and `×` to remove the dimension (both only while no cell is stored under them). **New dimension** adds a dimension with its first value; **Plain values** chooses none. What is chosen shows in the status line as "Showing scenario=actual". The menu stays open while you type.
+- **3D view** (Data ▸ 3D view…): the data as a cube of rows, columns and the values of one dimension, drawn as a bar chart. Choose which two of the three form the floor (across and depth) and where the third is held with the slider (for example columns × rows for the scenario "actual", then slide to "budget"). Drag to turn, scroll to zoom, double-click to reset, hover a bar for its value. It draws the selection (or the used area when one cell is selected), up to 40 × 40 bars, numbers only. It is drawn with ordinary egui shapes, so it works the same on every platform.
+- **Unsaved changes:** closing the window with changes since the last Save or Open asks "Save / Don't save / Cancel" (Cancel, or Esc, keeps the window). The same question comes before a dropped `.alfadoc` replaces unsaved work. The saved state is recorded about 1.5 s after a Save or Open, once the editors have settled; work that was recovered after a crash counts as unsaved. (The web build leaves this to the browser.)
+- **Drag and drop:** drop an `.alfadoc` file on the window to open it (a protected file asks for its passphrase) or an Excel, Word or PowerPoint file to import it; a hint covers the window while a file is dragged over it. Other file types are refused with a message.
+- **Export** (tab bar) opens a window: the current editor's Office file (.xlsx, .docx, .pptx) or **PDF** (native builds; the engine's own print layout, written through its `file.exportPdf` / `file.export` command). For a document or slides, **Only what belongs to the current dimensions** leaves out the variant blocks and shapes marked for other values: the others are removed, the file is written and one undo brings them back, so your document is not changed and a saved document stays saved. Marks that belong to the current dimensions stay in the file as content-control tags and alt text. Sheets have no variants and are exported as they are.
 
 ## Known risks to look at first when you run it
 
@@ -81,7 +85,13 @@ The **Data** tab shows the shared store as a grid with GridCraft's limits (1,048
 - **Fill handle:** drag the small square at the corner of the selection down or right. Two or more numbers or dates continue as a series (1, 2 → 3, 4, 5); anything else repeats, formulas move their relative references and styles are copied.
 - **Paste special…** (Edit ▸ Paste special): everything, values, formulas or formatting only, skip blanks, and transpose.
 - **Compare vectors** (Data menu): the selected cells under two or more values of one dimension side by side (actual, budget), with the difference and the change in percent for two; Copy table gives tab-separated text, and **Put on a new sheet** writes the table to a new data sheet that you can link to a sheet, a document table or a slide.
-- Not there yet: merged cells, conditional formatting, data validation, comments, grouping, double-click on the fill handle to fill as far as the neighbouring column goes.
+- **Merge cells** (Format ▸ Merge cells / Unmerge cells): the selection becomes one cell showing the top-left content; the other cells are cleared (undo brings them back). Clicking or arrowing into a merged area lands on its first cell, the area is painted and focused as one, and sorting a range that touches a merged area is refused with a message.
+- **Conditional formatting** (Format ▸ Conditional formatting…): rules for the selection: greater than, less than, equal to, between, text contains, blank, not blank, each with a fill, text colour and bold, plus two-colour scales that blend from the lowest to the highest number in the range. The first matching rule wins; scales are calculated for the visible grid only when the data or the rules change.
+- **Data validation** (Data ▸ Data validation…): a list of choices (a drop-down arrow appears in the cell), whole numbers, decimals or text length, each with an optional message and "allow blank". A value typed in a cell, in the formula bar or picked from a list that breaks the rule is refused and the message says why. Pasting and filling are not checked.
+- **Comments** (Insert ▸ Comment…, Delete comment): a note on a cell, shown by a red corner mark and as a tooltip on hover.
+- **Grouping** (Data ▸ Group): group the selected rows or columns (up to seven levels), ungroup, collapse or expand the group here or everything; a bar in the row or column header shows the levels. A collapsed group is the group's lines added to the hidden lines, so it saves and undoes like hiding does.
+- Merges, rules, validations, comments and groups are saved with the sheet (`format.extras` in `data/maix.json`), undo and redo with it, and move when rows or columns are inserted or deleted.
+- Not there yet: double-click on the fill handle to fill as far as the neighbouring column goes.
 
 ### File end (an Excel, Word or PowerPoint file on disk)
 
